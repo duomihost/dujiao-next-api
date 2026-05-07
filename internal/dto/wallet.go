@@ -94,9 +94,21 @@ func NewWalletRechargeRespList(orders []models.WalletRechargeOrder) []WalletRech
 	return result
 }
 
+// WalletRechargeInPaymentResp 充值发起支付场景中返回的充值单概要（不含费率等与渠道结算相关的字段）。
+type WalletRechargeInPaymentResp struct {
+	ID            uint         `json:"id"`
+	RechargeNo    string       `json:"recharge_no"`
+	Amount        models.Money `json:"amount"`
+	PayableAmount models.Money `json:"payable_amount"`
+	Status        string       `json:"status"`
+	Remark        string       `json:"remark"`
+	PaidAt        *time.Time   `json:"paid_at,omitempty"`
+	CreatedAt     time.Time    `json:"created_at"`
+}
+
 // WalletRechargePaymentPayload 钱包充值支付响应载荷
 type WalletRechargePaymentPayload struct {
-	Recharge        *WalletRechargeResp `json:"recharge,omitempty"`
+	Recharge        *WalletRechargeInPaymentResp `json:"recharge,omitempty"`
 	RechargeNo      string              `json:"recharge_no,omitempty"`
 	RechargeStatus  string              `json:"recharge_status,omitempty"`
 	Account         *WalletAccountResp  `json:"account,omitempty"`
@@ -114,8 +126,16 @@ type WalletRechargePaymentPayload struct {
 func NewWalletRechargePaymentPayload(recharge *models.WalletRechargeOrder, payment *models.Payment, account *models.WalletAccount) WalletRechargePaymentPayload {
 	p := WalletRechargePaymentPayload{}
 	if recharge != nil {
-		r := NewWalletRechargeResp(recharge)
-		p.Recharge = &r
+		p.Recharge = &WalletRechargeInPaymentResp{
+			ID:            recharge.ID,
+			RechargeNo:    recharge.RechargeNo,
+			Amount:        recharge.Amount,
+			PayableAmount: recharge.PayableAmount,
+			Status:        recharge.Status,
+			Remark:        recharge.Remark,
+			PaidAt:        recharge.PaidAt,
+			CreatedAt:     recharge.CreatedAt,
+		}
 		p.RechargeNo = recharge.RechargeNo
 		p.RechargeStatus = recharge.Status
 	}

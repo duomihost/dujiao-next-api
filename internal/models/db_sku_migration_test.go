@@ -33,6 +33,7 @@ func TestEnsureProductSKUMigrationBackfillLegacyData(t *testing.T) {
 		&CartItem{},
 		&CardSecret{},
 		&CardSecretBatch{},
+		&Setting{},
 	); err != nil {
 		t.Fatalf("auto migrate failed: %v", err)
 	}
