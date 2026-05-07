@@ -84,12 +84,23 @@ go mod tidy
 
 # 计算注入版本号：
 #   1) APP_VERSION 环境变量可手动覆盖
-#   2) 优先使用 git describe --tags，例如 v1.3.5 或 v1.3.5-1-gf811533
-#      后台更新检测只解析主版本号部分，因此 v1.3.5-1-gxxxx 会按 v1.3.5 比较
-#   3) 没有 tag 时回退到短提交号
+#   2) 优先从 GitHub 最新 Release 取干净版本号，例如 1.0.5
+#   3) 其次使用最近的 git tag，并去掉前缀 v
+#   4) 没有 tag 时回退到短提交号
 APP_VERSION="${APP_VERSION:-}"
 if [[ -z "$APP_VERSION" ]]; then
-  APP_VERSION="$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD)"
+  APP_VERSION="$(
+    curl -fsSL https://api.github.com/repos/dujiao-next/dujiao-next/releases/latest 2>/dev/null \
+      | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+      | head -n 1 \
+      | sed 's/^[vV]//'
+  )"
+fi
+if [[ -z "$APP_VERSION" ]]; then
+  APP_VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^[vV]//' || true)"
+fi
+if [[ -z "$APP_VERSION" ]]; then
+  APP_VERSION="$(git rev-parse --short HEAD)"
 fi
 LDFLAGS="-s -w -X github.com/dujiao-next/internal/version.Version=${APP_VERSION}"
 
