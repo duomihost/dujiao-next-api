@@ -63,6 +63,7 @@ log "fetch origin $BRANCH"
 # 兼容 single-branch 克隆：先把分支加入 fetch 列表
 git remote set-branches --add origin "$BRANCH" >/dev/null 2>&1 || true
 git fetch origin "$BRANCH"
+git fetch --tags origin >/dev/null 2>&1 || warn "拉取 tags 失败，将使用提交号作为版本号"
 
 # 工作区干净检查
 if [[ -n "$(git status --porcelain)" ]]; then
@@ -82,14 +83,13 @@ log "go mod tidy"
 go mod tidy
 
 # 计算注入版本号：
-#   优先 git tag（精确匹配 -> 最近 tag+commit）；否则用分支@短 commit
-GIT_TAG_EXACT="$(git describe --tags --exact-match 2>/dev/null || true)"
-GIT_DESCRIBE="$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD)"
-GIT_BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-if [[ -n "$GIT_TAG_EXACT" ]]; then
-  APP_VERSION="$GIT_TAG_EXACT"
-else
-  APP_VERSION="${GIT_BRANCH}@${GIT_DESCRIBE}"
+#   1) APP_VERSION 环境变量可手动覆盖
+#   2) 优先使用 git describe --tags，例如 v1.3.5 或 v1.3.5-1-gf811533
+#      后台更新检测只解析主版本号部分，因此 v1.3.5-1-gxxxx 会按 v1.3.5 比较
+#   3) 没有 tag 时回退到短提交号
+APP_VERSION="${APP_VERSION:-}"
+if [[ -z "$APP_VERSION" ]]; then
+  APP_VERSION="$(git describe --tags --always --dirty 2>/dev/null || git rev-parse --short HEAD)"
 fi
 LDFLAGS="-s -w -X github.com/dujiao-next/internal/version.Version=${APP_VERSION}"
 
