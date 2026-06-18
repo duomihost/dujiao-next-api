@@ -11,9 +11,31 @@ import (
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/models"
+	"github.com/dujiao-next/internal/payment/provider"
 
 	"github.com/shopspring/decimal"
 )
+
+type emptyProviderRefProvider struct {
+	onCreate func(provider.CreateInput)
+}
+
+func (p emptyProviderRefProvider) Type() string {
+	return constants.PaymentProviderOfficial + ":" + constants.PaymentChannelTypeWechat
+}
+
+func (p emptyProviderRefProvider) ValidateConfig(models.JSON, string) error {
+	return nil
+}
+
+func (p emptyProviderRefProvider) CreatePayment(_ context.Context, _ models.JSON, input provider.CreateInput) (*provider.CreateResult, error) {
+	if p.onCreate != nil {
+		p.onCreate(input)
+	}
+	return &provider.CreateResult{
+		QRCodeURL: "weixin://wxpay/bizpayurl?pr=test",
+	}, nil
+}
 
 func TestShouldUseGatewayOrderNo(t *testing.T) {
 	tests := []struct {
@@ -31,7 +53,7 @@ func TestShouldUseGatewayOrderNo(t *testing.T) {
 		{
 			name: "epusdt",
 			channel: &models.PaymentChannel{
-				ProviderType: constants.PaymentProviderEpusdt,
+				ProviderType: constants.PaymentProviderBepusdt,
 			},
 			want: true,
 		},
@@ -69,7 +91,7 @@ func TestShouldUseGatewayOrderNo(t *testing.T) {
 }
 
 func TestResolveGatewayOrderNo(t *testing.T) {
-	channel := &models.PaymentChannel{ProviderType: constants.PaymentProviderEpusdt}
+	channel := &models.PaymentChannel{ProviderType: constants.PaymentProviderBepusdt}
 	payment := &models.Payment{ID: 123}
 
 	gotFirst := resolveGatewayOrderNo(channel, payment)
@@ -109,7 +131,94 @@ func TestResolveGatewayOrderNo(t *testing.T) {
 	}
 }
 
-func TestApplyProviderPaymentUsesGatewayOrderNoForEpusdt(t *testing.T) {
+func TestApplyProviderPaymentFallsBackToWechatGatewayOrderNoWhenProviderRefEmpty(t *testing.T) {
+	svc, db := setupPaymentServiceWalletTest(t)
+	now := time.Now()
+
+	order := &models.Order{
+		OrderNo:                 "DJTESTWECHAT001",
+		UserID:                  1,
+		Status:                  constants.OrderStatusPendingPayment,
+		Currency:                "CNY",
+		OriginalAmount:          models.NewMoneyFromDecimal(decimal.NewFromInt(1)),
+		DiscountAmount:          models.NewMoneyFromDecimal(decimal.Zero),
+		PromotionDiscountAmount: models.NewMoneyFromDecimal(decimal.Zero),
+		TotalAmount:             models.NewMoneyFromDecimal(decimal.NewFromInt(1)),
+		WalletPaidAmount:        models.NewMoneyFromDecimal(decimal.Zero),
+		OnlinePaidAmount:        models.NewMoneyFromDecimal(decimal.NewFromInt(1)),
+		RefundedAmount:          models.NewMoneyFromDecimal(decimal.Zero),
+		CreatedAt:               now,
+		UpdatedAt:               now,
+	}
+	if err := db.Create(order).Error; err != nil {
+		t.Fatalf("create order failed: %v", err)
+	}
+
+	channel := &models.PaymentChannel{
+		ProviderType:    constants.PaymentProviderOfficial,
+		ChannelType:     constants.PaymentChannelTypeWechat,
+		InteractionMode: constants.PaymentInteractionQR,
+		FeeRate:         models.NewMoneyFromDecimal(decimal.Zero),
+		ConfigJSON: models.JSON{
+			"notify_url": "https://api.example.com/api/v1/payments/callback",
+		},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := db.Create(channel).Error; err != nil {
+		t.Fatalf("create channel failed: %v", err)
+	}
+
+	payment := &models.Payment{
+		OrderID:         order.ID,
+		ChannelID:       channel.ID,
+		ProviderType:    channel.ProviderType,
+		ChannelType:     channel.ChannelType,
+		InteractionMode: channel.InteractionMode,
+		Amount:          models.NewMoneyFromDecimal(decimal.RequireFromString("1.00")),
+		FeeRate:         models.NewMoneyFromDecimal(decimal.Zero),
+		FeeAmount:       models.NewMoneyFromDecimal(decimal.Zero),
+		Currency:        "CNY",
+		Status:          constants.PaymentStatusInitiated,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if err := db.Create(payment).Error; err != nil {
+		t.Fatalf("create payment failed: %v", err)
+	}
+
+	var providerInputOrderNo string
+	svc.paymentProviderRegistry.Register(constants.PaymentProviderOfficial, constants.PaymentChannelTypeWechat, emptyProviderRefProvider{
+		onCreate: func(input provider.CreateInput) {
+			providerInputOrderNo = strings.TrimSpace(input.OrderNo)
+		},
+	})
+
+	if err := svc.applyProviderPayment(CreatePaymentInput{
+		ClientIP: "127.0.0.1",
+		Context:  context.Background(),
+	}, order, channel, payment); err != nil {
+		t.Fatalf("applyProviderPayment failed: %v", err)
+	}
+
+	if payment.GatewayOrderNo == "" {
+		t.Fatalf("payment gateway order no should not be empty")
+	}
+	if !strings.HasPrefix(payment.GatewayOrderNo, "DJP") {
+		t.Fatalf("payment gateway order no should keep DJP prefix, got %s", payment.GatewayOrderNo)
+	}
+	if providerInputOrderNo != payment.GatewayOrderNo {
+		t.Fatalf("wechat create order no = %s, want %s", providerInputOrderNo, payment.GatewayOrderNo)
+	}
+	if payment.ProviderRef != payment.GatewayOrderNo {
+		t.Fatalf("provider ref fallback = %s, want gateway order no %s", payment.ProviderRef, payment.GatewayOrderNo)
+	}
+	if payment.ProviderRef == order.OrderNo {
+		t.Fatalf("provider ref should not fall back to business order no")
+	}
+}
+
+func TestApplyProviderPaymentUsesGatewayOrderNoForBepusdt(t *testing.T) {
 	svc, db := setupPaymentServiceWalletTest(t)
 	now := time.Now()
 
@@ -146,7 +255,7 @@ func TestApplyProviderPaymentUsesGatewayOrderNoForEpusdt(t *testing.T) {
 	defer server.Close()
 
 	channel := &models.PaymentChannel{
-		ProviderType:    constants.PaymentProviderEpusdt,
+		ProviderType:    constants.PaymentProviderBepusdt,
 		ChannelType:     constants.PaymentChannelTypeUsdtTrc20,
 		InteractionMode: constants.PaymentInteractionRedirect,
 		FeeRate:         models.NewMoneyFromDecimal(decimal.Zero),
@@ -459,7 +568,7 @@ func TestHandleCallbackAcceptsGatewayOrderNoForOrderPayment(t *testing.T) {
 	payment := &models.Payment{
 		OrderID:         order.ID,
 		ChannelID:       1,
-		ProviderType:    constants.PaymentProviderEpusdt,
+		ProviderType:    constants.PaymentProviderBepusdt,
 		ChannelType:     constants.PaymentChannelTypeUsdtTrc20,
 		InteractionMode: constants.PaymentInteractionRedirect,
 		Amount:          models.NewMoneyFromDecimal(decimal.NewFromInt(88)),

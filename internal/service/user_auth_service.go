@@ -155,11 +155,15 @@ func (s *UserAuthService) SendVerifyCode(email, purpose, locale string) error {
 	if err != nil {
 		return err
 	}
+	purpose = strings.ToLower(strings.TrimSpace(purpose))
 	if !isVerifyPurposeSupported(purpose) {
 		return ErrInvalidVerifyPurpose
 	}
 
 	if purpose == constants.VerifyPurposeRegister {
+		if err := s.checkRegistrationEmailDomain(normalized); err != nil {
+			return err
+		}
 		exist, err := s.userRepo.GetByEmail(normalized)
 		if err != nil {
 			return err
@@ -195,7 +199,18 @@ func (s *UserAuthService) SendVerifyCode(email, purpose, locale string) error {
 		}
 	}
 
-	return s.sendVerifyCode(normalized, strings.ToLower(purpose), locale)
+	return s.sendVerifyCode(normalized, purpose, locale)
+}
+
+func (s *UserAuthService) checkRegistrationEmailDomain(email string) error {
+	if s == nil || s.settingService == nil {
+		return nil
+	}
+	policy, err := s.settingService.GetRegistrationEmailDomainPolicy()
+	if err != nil {
+		return err
+	}
+	return CheckRegistrationEmailDomainAllowed(email, policy)
 }
 
 // Register 用户注册
@@ -205,6 +220,9 @@ func (s *UserAuthService) Register(email, password, code string, agreementAccept
 	}
 	normalized, err := normalizeEmail(email)
 	if err != nil {
+		return nil, "", time.Time{}, err
+	}
+	if err := s.checkRegistrationEmailDomain(normalized); err != nil {
 		return nil, "", time.Time{}, err
 	}
 	if err := validatePassword(s.cfg.Security.PasswordPolicy, password); err != nil {

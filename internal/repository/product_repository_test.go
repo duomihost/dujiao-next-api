@@ -22,6 +22,7 @@ func setupProductRepositoryTest(t *testing.T) (*GormProductRepository, *gorm.DB)
 		t.Fatalf("open sqlite failed: %v", err)
 	}
 	if err := db.AutoMigrate(
+		&models.Category{},
 		&models.Product{},
 		&models.ProductSKU{},
 		&models.CardSecret{},
@@ -30,6 +31,15 @@ func setupProductRepositoryTest(t *testing.T) (*GormProductRepository, *gorm.DB)
 		&models.SKUMapping{},
 	); err != nil {
 		t.Fatalf("migrate product/sku/card_secret/mappings failed: %v", err)
+	}
+	defaultCategory := models.Category{
+		ID:       1,
+		Slug:     "default-test-category",
+		NameJSON: models.JSON{"zh-CN": "default"},
+		IsActive: true,
+	}
+	if err := db.Create(&defaultCategory).Error; err != nil {
+		t.Fatalf("seed default category failed: %v", err)
 	}
 	return NewProductRepository(db), db
 }
@@ -430,5 +440,61 @@ func TestProductRepositoryListSupportsNumericIDSearch(t *testing.T) {
 		if !found {
 			t.Fatalf("search result missing target product id=%d rows=%+v", target.ID, rows)
 		}
+	}
+}
+
+func TestProductRepositoryListFiltersWholesalePrices(t *testing.T) {
+	repo, _ := setupProductRepositoryTest(t)
+
+	withWholesale := &models.Product{
+		CategoryID:      1,
+		Slug:            "with-wholesale",
+		TitleJSON:       models.JSON{"zh-CN": "有批发价"},
+		PriceAmount:     models.NewMoneyFromDecimal(decimal.NewFromInt(100)),
+		WholesalePrices: models.WholesalePriceTiers{{MinQuantity: 5, UnitPrice: models.NewMoneyFromDecimal(decimal.NewFromInt(80))}},
+		PurchaseType:    constants.ProductPurchaseMember,
+		FulfillmentType: constants.FulfillmentTypeAuto,
+		IsActive:        true,
+	}
+	if err := repo.Create(withWholesale); err != nil {
+		t.Fatalf("create product with wholesale failed: %v", err)
+	}
+
+	withoutWholesale := &models.Product{
+		CategoryID:      1,
+		Slug:            "without-wholesale",
+		TitleJSON:       models.JSON{"zh-CN": "无批发价"},
+		PriceAmount:     models.NewMoneyFromDecimal(decimal.NewFromInt(100)),
+		PurchaseType:    constants.ProductPurchaseMember,
+		FulfillmentType: constants.FulfillmentTypeAuto,
+		IsActive:        true,
+	}
+	if err := repo.Create(withoutWholesale); err != nil {
+		t.Fatalf("create product without wholesale failed: %v", err)
+	}
+
+	enabled := true
+	rows, _, err := repo.List(ProductListFilter{Page: 1, PageSize: 20, HasWholesalePrices: &enabled})
+	if err != nil {
+		t.Fatalf("list products with wholesale failed: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Slug != withWholesale.Slug {
+		t.Fatalf("expected only product with wholesale, got %+v", rows)
+	}
+
+	disabled := false
+	rows, _, err = repo.List(ProductListFilter{Page: 1, PageSize: 20, HasWholesalePrices: &disabled})
+	if err != nil {
+		t.Fatalf("list products without wholesale failed: %v", err)
+	}
+	got := make(map[string]bool, len(rows))
+	for _, row := range rows {
+		got[row.Slug] = true
+	}
+	if got[withWholesale.Slug] {
+		t.Fatalf("product with wholesale should not be returned: %+v", rows)
+	}
+	if !got[withoutWholesale.Slug] {
+		t.Fatalf("product without wholesale missing: %+v", rows)
 	}
 }

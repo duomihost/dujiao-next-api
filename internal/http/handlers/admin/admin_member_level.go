@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/http/response"
@@ -29,18 +28,12 @@ type CreateMemberLevelRequest struct {
 
 // GetAdminMemberLevels 获取会员等级列表
 func (h *Handler) GetAdminMemberLevels(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePaginationWithKeys(c, "page", "page_size", 50)
 
-	var isActive *bool
-	if raw := c.Query("is_active"); raw != "" {
-		parsed, err := strconv.ParseBool(raw)
-		if err != nil {
-			shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-			return
-		}
-		isActive = &parsed
+	isActive, err := shared.ParseQueryBoolPtr(c, "is_active")
+	if err != nil {
+		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+		return
 	}
 
 	levels, total, err := h.MemberLevelService.ListLevels(repository.MemberLevelListFilter{
@@ -86,6 +79,8 @@ func (h *Handler) CreateMemberLevel(c *gin.Context) {
 		switch {
 		case errors.Is(err, service.ErrMemberLevelSlugExists):
 			shared.RespondError(c, response.CodeBadRequest, "error.member_level_slug_exists", nil)
+		case errors.Is(err, service.ErrMemberLevelSortOrderUsed):
+			shared.RespondError(c, response.CodeBadRequest, "error.member_level_sort_order_used", nil)
 		default:
 			shared.RespondError(c, response.CodeInternal, "error.member_level_create_failed", err)
 		}
@@ -135,6 +130,8 @@ func (h *Handler) UpdateMemberLevel(c *gin.Context) {
 		switch {
 		case errors.Is(err, service.ErrMemberLevelSlugExists):
 			shared.RespondError(c, response.CodeBadRequest, "error.member_level_slug_exists", nil)
+		case errors.Is(err, service.ErrMemberLevelSortOrderUsed):
+			shared.RespondError(c, response.CodeBadRequest, "error.member_level_sort_order_used", nil)
 		case errors.Is(err, service.ErrMemberLevelNotFound):
 			shared.RespondError(c, response.CodeNotFound, "error.member_level_not_found", nil)
 		default:

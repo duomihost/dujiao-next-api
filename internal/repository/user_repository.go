@@ -8,6 +8,7 @@ import (
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/models"
 
+	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
 )
 
@@ -18,6 +19,9 @@ type UserRepository interface {
 	ListByIDs(ids []uint) ([]models.User, error)
 	Create(user *models.User) error
 	Update(user *models.User) error
+	IncrementTotalRecharged(userID uint, amount decimal.Decimal) error
+	IncrementTotalSpent(userID uint, amount decimal.Decimal) error
+	UpdateMemberLevelIfCurrent(userID, currentLevelID, nextLevelID uint) (int64, error)
 	List(filter UserListFilter) ([]models.User, int64, error)
 	BatchUpdateStatus(userIDs []uint, status string) error
 	AssignDefaultMemberLevel(defaultLevelID uint) (int64, error)
@@ -85,10 +89,53 @@ func (r *GormUserRepository) Update(user *models.User) error {
 	return r.db.Save(user).Error
 }
 
+// IncrementTotalRecharged 原子累加用户累计充值金额。
+func (r *GormUserRepository) IncrementTotalRecharged(userID uint, amount decimal.Decimal) error {
+	return r.incrementMoneyColumn(userID, "total_recharged", amount)
+}
+
+// IncrementTotalSpent 原子累加用户累计消费金额。
+func (r *GormUserRepository) IncrementTotalSpent(userID uint, amount decimal.Decimal) error {
+	return r.incrementMoneyColumn(userID, "total_spent", amount)
+}
+
+func (r *GormUserRepository) incrementMoneyColumn(userID uint, column string, amount decimal.Decimal) error {
+	if userID == 0 {
+		return nil
+	}
+	amount = amount.Round(2)
+	if amount.LessThanOrEqual(decimal.Zero) {
+		return nil
+	}
+	return r.db.Model(&models.User{}).
+		Where("id = ?", userID).
+		Updates(map[string]interface{}{
+			column:       gorm.Expr(column+" + ?", models.NewMoneyFromDecimal(amount)),
+			"updated_at": time.Now(),
+		}).Error
+}
+
+// UpdateMemberLevelIfCurrent 仅在用户当前等级未被其他流程改变时更新会员等级。
+func (r *GormUserRepository) UpdateMemberLevelIfCurrent(userID, currentLevelID, nextLevelID uint) (int64, error) {
+	if userID == 0 || currentLevelID == nextLevelID {
+		return 0, nil
+	}
+	result := r.db.Model(&models.User{}).
+		Where("id = ? AND member_level_id = ?", userID, currentLevelID).
+		Updates(map[string]interface{}{
+			"member_level_id": nextLevelID,
+			"updated_at":      time.Now(),
+		})
+	return result.RowsAffected, result.Error
+}
+
 // List 用户列表
 func (r *GormUserRepository) List(filter UserListFilter) ([]models.User, int64, error) {
 	query := r.db.Model(&models.User{})
 
+	if filter.UserID != 0 {
+		query = query.Where("users.id = ?", filter.UserID)
+	}
 	if filter.Keyword != "" {
 		like := "%" + filter.Keyword + "%"
 		query = query.Where(
@@ -126,12 +173,38 @@ func (r *GormUserRepository) List(filter UserListFilter) ([]models.User, int64, 
 	}
 
 	query = applyPagination(query, filter.Page, filter.PageSize)
+	query = applyUserSort(query, filter.SortBy, filter.SortOrder)
 
 	var users []models.User
-	if err := query.Order("id DESC").Find(&users).Error; err != nil {
+	if err := query.Find(&users).Error; err != nil {
 		return nil, 0, err
 	}
 	return users, total, nil
+}
+
+// applyUserSort 按白名单字段排序，并追加 users.id DESC 作为二级排序保证分页稳定；
+// 非法字段回退默认 id DESC。
+func applyUserSort(query *gorm.DB, sortBy, sortOrder string) *gorm.DB {
+	dir := "DESC"
+	if strings.EqualFold(strings.TrimSpace(sortOrder), "asc") {
+		dir = "ASC"
+	}
+	switch strings.TrimSpace(sortBy) {
+	case "created_at":
+		return query.Order("users.created_at " + dir).Order("users.id DESC")
+	case "last_login_at":
+		// (last_login_at IS NULL) 让从未登录的用户始终垫底，跨 SQLite/PostgreSQL 行为一致
+		return query.Order("users.last_login_at IS NULL").Order("users.last_login_at " + dir).Order("users.id DESC")
+	case "wallet_balance":
+		// 钱包余额在 wallet_accounts 表，LEFT JOIN + COALESCE(0) 让无账户用户按余额 0 处理
+		return query.
+			Joins("LEFT JOIN wallet_accounts ON wallet_accounts.user_id = users.id").
+			Select("users.*").
+			Order("COALESCE(wallet_accounts.balance, 0) " + dir).
+			Order("users.id DESC")
+	default:
+		return query.Order("users.id DESC")
+	}
 }
 
 // BatchUpdateStatus 批量更新用户状态

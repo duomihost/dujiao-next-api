@@ -7,6 +7,7 @@ import (
 	"github.com/dujiao-next/internal/config"
 	"github.com/dujiao-next/internal/logger"
 	"github.com/dujiao-next/internal/queue"
+	"github.com/dujiao-next/internal/service"
 
 	"github.com/hibiken/asynq"
 )
@@ -59,10 +60,29 @@ func registerPeriodicTasks(scheduler *asynq.Scheduler, consumer *Consumer, cfg *
 			logger.Infow("scheduler_register_affiliate_confirm_ok", "entry_id", entryID)
 		}
 	}
+	if consumer.ResellerAccountingService != nil {
+		task := queue.NewResellerConfirmLedgerTask()
+		entryID, err := scheduler.Register("@every 1m", task, asynq.Queue(queue.DefaultQueue))
+		if err != nil {
+			logger.Warnw("scheduler_register_reseller_confirm_ledger_failed", "error", err)
+		} else {
+			logger.Infow("scheduler_register_reseller_confirm_ledger_ok", "entry_id", entryID)
+		}
+	}
 	if consumer.ProductMappingService != nil {
-		syncInterval := "5m"
+		fallbackInterval := "5m"
 		if cfg != nil && cfg.UpstreamSyncInterval != "" {
-			syncInterval = cfg.UpstreamSyncInterval
+			fallbackInterval = cfg.UpstreamSyncInterval
+		}
+		// 优先读取后台动态设置；失败则回落到 config.yml 的兜底值
+		syncInterval := fallbackInterval
+		if consumer.SettingService != nil {
+			d, err := consumer.SettingService.GetUpstreamSyncInterval(fallbackInterval)
+			if err != nil {
+				logger.Warnw("scheduler_load_upstream_sync_interval_failed", "error", err, "fallback", fallbackInterval)
+			} else if d > 0 {
+				syncInterval = service.FormatUpstreamSyncIntervalForScheduler(d)
+			}
 		}
 		task := queue.NewUpstreamSyncStockTask()
 		entryID, err := scheduler.Register("@every "+syncInterval, task, asynq.Queue(queue.DefaultQueue))

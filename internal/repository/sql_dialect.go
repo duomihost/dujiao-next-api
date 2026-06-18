@@ -29,6 +29,20 @@ func jsonTextExpr(db *gorm.DB, column, key string) string {
 	return jsonTextExprByDialect(dbDialectName(db), column, key)
 }
 
+// jsonArrayLengthExpr 构建 JSON 数组长度表达式，兼容 sqlite 与 postgres。
+func jsonArrayLengthExpr(db *gorm.DB, column string) string {
+	return jsonArrayLengthExprByDialect(dbDialectName(db), column)
+}
+
+func jsonArrayLengthExprByDialect(dialect, column string) string {
+	switch strings.ToLower(strings.TrimSpace(dialect)) {
+	case "postgres", "postgresql":
+		return fmt.Sprintf("jsonb_array_length(COALESCE(%s::jsonb, '[]'::jsonb))", column)
+	default:
+		return fmt.Sprintf("json_array_length(COALESCE(%s, '[]'))", column)
+	}
+}
+
 func jsonTextExprByDialect(dialect, column, key string) string {
 	switch strings.ToLower(strings.TrimSpace(dialect)) {
 	case "postgres", "postgresql":

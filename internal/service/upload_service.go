@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"image"
 	"io"
@@ -36,6 +37,24 @@ type UploadService struct {
 	cfg *config.Config
 }
 
+// UploadValidationError 表示上传内容不符合业务校验规则，可直接展示给管理员。
+type UploadValidationError struct {
+	Message string
+}
+
+func (e *UploadValidationError) Error() string {
+	return e.Message
+}
+
+func newUploadValidationError(format string, args ...interface{}) error {
+	return &UploadValidationError{Message: fmt.Sprintf(format, args...)}
+}
+
+func IsUploadValidationError(err error) bool {
+	var validationErr *UploadValidationError
+	return errors.As(err, &validationErr)
+}
+
 // NewUploadService 创建文件上传服务实例
 func NewUploadService(cfg *config.Config) *UploadService {
 	return &UploadService{cfg: cfg}
@@ -66,14 +85,14 @@ func (s *UploadService) SaveFileWithMeta(file *multipart.FileHeader, scene strin
 
 	// 验证文件大小
 	if file.Size > s.cfg.Upload.MaxSize {
-		return nil, fmt.Errorf("文件大小超过限制（最大 %d MB）", s.cfg.Upload.MaxSize/1024/1024)
+		return nil, newUploadValidationError("文件大小超过限制（最大 %d MB）", s.cfg.Upload.MaxSize/1024/1024)
 	}
 
 	// 获取文件扩展名
 	ext := strings.ToLower(filepath.Ext(file.Filename))
 	if normalizedScene != "telegram" && len(s.cfg.Upload.AllowedExtensions) > 0 {
 		if ext == "" || !isAllowedExtension(ext, s.cfg.Upload.AllowedExtensions) {
-			return nil, fmt.Errorf("文件扩展名不被允许: %s", ext)
+			return nil, newUploadValidationError("文件扩展名不被允许: %s", ext)
 		}
 	}
 
@@ -108,7 +127,7 @@ func (s *UploadService) SaveFileWithMeta(file *multipart.FileHeader, scene strin
 			}
 		}
 		if !allowed {
-			return nil, fmt.Errorf("文件类型不被允许: %s", contentType)
+			return nil, newUploadValidationError("文件类型不被允许: %s", contentType)
 		}
 	}
 
@@ -119,15 +138,15 @@ func (s *UploadService) SaveFileWithMeta(file *multipart.FileHeader, scene strin
 		}
 		width, height, err := decodeImageDimensions(src, contentType)
 		if err != nil {
-			return nil, err
+			return nil, newUploadValidationError("%s", err.Error())
 		}
 		imgWidth = width
 		imgHeight = height
 		if s.cfg.Upload.MaxWidth > 0 && width > s.cfg.Upload.MaxWidth {
-			return nil, fmt.Errorf("图片宽度超过限制（最大 %d）", s.cfg.Upload.MaxWidth)
+			return nil, newUploadValidationError("图片宽度超过限制（最大 %d）", s.cfg.Upload.MaxWidth)
 		}
 		if s.cfg.Upload.MaxHeight > 0 && height > s.cfg.Upload.MaxHeight {
-			return nil, fmt.Errorf("图片高度超过限制（最大 %d）", s.cfg.Upload.MaxHeight)
+			return nil, newUploadValidationError("图片高度超过限制（最大 %d）", s.cfg.Upload.MaxHeight)
 		}
 	}
 
@@ -141,7 +160,7 @@ func (s *UploadService) SaveFileWithMeta(file *multipart.FileHeader, scene strin
 			return nil, err
 		}
 		if err := validateSVGSafety(svgData); err != nil {
-			return nil, err
+			return nil, newUploadValidationError("%s", err.Error())
 		}
 		if _, err := src.Seek(0, 0); err != nil {
 			return nil, err

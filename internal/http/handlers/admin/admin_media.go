@@ -11,6 +11,10 @@ import (
 
 // ====================  素材管理  ====================
 
+type BatchDeleteMediaRequest struct {
+	IDs []uint `json:"ids" binding:"required,min=1"`
+}
+
 // GetAdminMedia 素材列表
 func (h *Handler) GetAdminMedia(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -32,7 +36,7 @@ func (h *Handler) GetAdminMedia(c *gin.Context) {
 
 // UpdateMedia 更新素材信息（重命名）
 func (h *Handler) UpdateMedia(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	id, err := shared.ParseParamUint(c, "id")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.invalid_id", nil)
 		return
@@ -46,7 +50,7 @@ func (h *Handler) UpdateMedia(c *gin.Context) {
 		return
 	}
 
-	if err := h.MediaService.Rename(uint(id), req.Name); err != nil {
+	if err := h.MediaService.Rename(id, req.Name); err != nil {
 		shared.RespondError(c, response.CodeInternal, "error.internal", err)
 		return
 	}
@@ -54,15 +58,31 @@ func (h *Handler) UpdateMedia(c *gin.Context) {
 	response.Success(c, nil)
 }
 
+// BatchDeleteMedia 批量删除素材
+func (h *Handler) BatchDeleteMedia(c *gin.Context) {
+	var req BatchDeleteMediaRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		shared.RespondBindError(c, err)
+		return
+	}
+
+	successCount, failedIDs := h.MediaService.BatchDelete(req.IDs)
+	response.Success(c, gin.H{
+		"total":         len(req.IDs),
+		"success_count": successCount,
+		"failed_ids":    failedIDs,
+	})
+}
+
 // DeleteMedia 删除素材
 func (h *Handler) DeleteMedia(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	id, err := shared.ParseParamUint(c, "id")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.invalid_id", nil)
 		return
 	}
 
-	if err := h.MediaService.Delete(uint(id)); err != nil {
+	if err := h.MediaService.Delete(id); err != nil {
 		shared.RespondError(c, response.CodeInternal, "error.internal", err)
 		return
 	}

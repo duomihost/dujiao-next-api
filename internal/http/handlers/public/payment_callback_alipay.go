@@ -3,16 +3,13 @@ package public
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/models"
-	"github.com/dujiao-next/internal/payment/alipay"
 	"github.com/dujiao-next/internal/service"
 
 	"github.com/gin-gonic/gin"
-	"github.com/shopspring/decimal"
 )
 
 func (h *Handler) HandleAlipayCallback(c *gin.Context) bool {
@@ -45,84 +42,22 @@ func (h *Handler) HandleAlipayCallback(c *gin.Context) bool {
 		return true
 	}
 
-	cfg, err := alipay.ParseConfig(channel.ConfigJSON)
-	if err != nil {
-		log.Warnw("alipay_callback_config_parse_failed",
-			"payment_id", payment.ID,
-			"channel_id", channel.ID,
-			"error", err,
-		)
-		c.String(200, constants.AlipayCallbackFail)
-		return true
-	}
-	if err := alipay.VerifyCallback(cfg, form); err != nil {
-		log.Warnw("alipay_callback_signature_invalid",
-			"payment_id", payment.ID,
-			"channel_id", channel.ID,
-			"error", err,
-		)
-		h.enqueuePaymentExceptionAlert(c, models.JSON{
-			"alert_type":  "alipay_signature_invalid",
-			"alert_level": "error",
-			"payment_id":  fmt.Sprintf("%d", payment.ID),
-			"message":     strings.TrimSpace(err.Error()),
-			"provider":    constants.PaymentChannelTypeAlipay,
-		})
-		c.String(200, constants.AlipayCallbackFail)
-		return true
-	}
-	if err := alipay.VerifyCallbackOwnership(cfg, form); err != nil {
-		log.Warnw("alipay_callback_ownership_invalid",
-			"payment_id", payment.ID,
-			"channel_id", channel.ID,
-			"error", err,
-		)
-		h.enqueuePaymentExceptionAlert(c, models.JSON{
-			"alert_type":  "alipay_ownership_invalid",
-			"alert_level": "error",
-			"payment_id":  fmt.Sprintf("%d", payment.ID),
-			"message":     strings.TrimSpace(err.Error()),
-			"provider":    constants.PaymentChannelTypeAlipay,
-		})
-		c.String(200, constants.AlipayCallbackFail)
-		return true
-	}
-
-	input, err := parseAlipayCallback(form, payment.ID)
-	if err != nil {
-		log.Warnw("alipay_callback_parse_failed",
-			"payment_id", payment.ID,
-			"channel_id", channel.ID,
-			"error", err,
-		)
-		h.enqueuePaymentExceptionAlert(c, models.JSON{
-			"alert_type":  "alipay_callback_parse_failed",
-			"alert_level": "error",
-			"payment_id":  fmt.Sprintf("%d", payment.ID),
-			"message":     strings.TrimSpace(err.Error()),
-			"provider":    constants.PaymentChannelTypeAlipay,
-		})
-		c.String(200, constants.AlipayCallbackFail)
-		return true
-	}
-	input.ChannelID = channel.ID
-	updated, err := h.PaymentService.HandleCallback(*input)
+	updated, err := h.PaymentService.HandleSyncCallback(channel, form, nil)
 	if err != nil {
 		log.Warnw("alipay_callback_handle_failed",
 			"payment_id", payment.ID,
 			"channel_id", channel.ID,
-			"order_no", input.OrderNo,
-			"provider_ref", input.ProviderRef,
-			"status", input.Status,
+			"out_trade_no", strings.TrimSpace(getFirstValue(form, "out_trade_no")),
+			"trade_no", strings.TrimSpace(getFirstValue(form, "trade_no")),
 			"error", err,
 		)
 		h.enqueuePaymentExceptionAlert(c, models.JSON{
-			"alert_type":  "alipay_callback_handle_failed",
-			"alert_level": "error",
-			"payment_id":  fmt.Sprintf("%d", payment.ID),
-			"order_no":    strings.TrimSpace(input.OrderNo),
-			"message":     strings.TrimSpace(err.Error()),
-			"provider":    constants.PaymentChannelTypeAlipay,
+			"alert_type":   "alipay_callback_handle_failed",
+			"alert_level":  "error",
+			"payment_id":   fmt.Sprintf("%d", payment.ID),
+			"out_trade_no": strings.TrimSpace(getFirstValue(form, "out_trade_no")),
+			"message":      strings.TrimSpace(err.Error()),
+			"provider":     constants.PaymentChannelTypeAlipay,
 		})
 		c.String(200, constants.AlipayCallbackFail)
 		return true
@@ -130,8 +65,8 @@ func (h *Handler) HandleAlipayCallback(c *gin.Context) bool {
 	log.Infow("alipay_callback_processed",
 		"payment_id", payment.ID,
 		"channel_id", channel.ID,
-		"order_no", input.OrderNo,
-		"provider_ref", input.ProviderRef,
+		"out_trade_no", strings.TrimSpace(getFirstValue(form, "out_trade_no")),
+		"trade_no", strings.TrimSpace(getFirstValue(form, "trade_no")),
 		"status", updated.Status,
 	)
 	c.String(200, constants.AlipayCallbackSuccess)
@@ -181,71 +116,4 @@ func (h *Handler) findAlipayCallbackPayment(form map[string][]string) (*models.P
 		}
 	}
 	return nil, nil, service.ErrPaymentNotFound
-}
-
-func parseAlipayCallback(form map[string][]string, paymentID uint) (*service.PaymentCallbackInput, error) {
-	if paymentID == 0 {
-		return nil, service.ErrPaymentInvalid
-	}
-	tradeStatus := strings.TrimSpace(getFirstValue(form, "trade_status"))
-	status, ok := mapAlipayTradeStatus(tradeStatus)
-	if !ok {
-		return nil, service.ErrPaymentStatusInvalid
-	}
-	amount := models.Money{}
-	if money := strings.TrimSpace(getFirstValue(form, "total_amount")); money != "" {
-		parsed, err := decimal.NewFromString(money)
-		if err != nil {
-			return nil, service.ErrPaymentInvalid
-		}
-		amount = models.NewMoneyFromDecimal(parsed)
-	}
-	providerRef := strings.TrimSpace(getFirstValue(form, "trade_no"))
-	if providerRef == "" {
-		providerRef = strings.TrimSpace(getFirstValue(form, "out_trade_no"))
-	}
-	payload := make(map[string]interface{}, len(form))
-	for key, values := range form {
-		if len(values) > 0 {
-			payload[key] = values[0]
-		}
-	}
-	return &service.PaymentCallbackInput{
-		PaymentID:   paymentID,
-		OrderNo:     strings.TrimSpace(getFirstValue(form, "out_trade_no")),
-		Status:      status,
-		ProviderRef: providerRef,
-		Amount:      amount,
-		PaidAt:      parseAlipayPaidAt(getFirstValue(form, "gmt_payment"), getFirstValue(form, "notify_time")),
-		Payload:     models.JSON(payload),
-	}, nil
-}
-
-func parseAlipayPaidAt(values ...string) *time.Time {
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" {
-			continue
-		}
-		if parsed, err := time.Parse("2006-01-02 15:04:05", value); err == nil {
-			return &parsed
-		}
-		if parsed, err := time.Parse(time.RFC3339, value); err == nil {
-			return &parsed
-		}
-	}
-	return nil
-}
-
-func mapAlipayTradeStatus(tradeStatus string) (string, bool) {
-	switch strings.ToUpper(strings.TrimSpace(tradeStatus)) {
-	case constants.AlipayTradeStatusSuccess, constants.AlipayTradeStatusFinished:
-		return constants.PaymentStatusSuccess, true
-	case constants.AlipayTradeStatusWaitBuyerPay:
-		return constants.PaymentStatusPending, true
-	case constants.AlipayTradeStatusClosed:
-		return constants.PaymentStatusFailed, true
-	default:
-		return "", false
-	}
 }

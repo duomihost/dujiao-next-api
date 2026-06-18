@@ -63,7 +63,8 @@ func setupChannelGiftCardHandlerTest(t *testing.T) (*gorm.DB, *httptest.Server) 
 	giftCardRepo := repository.NewGiftCardRepository(db)
 
 	settingSvc := service.NewSettingService(settingRepo)
-	walletSvc := service.NewWalletService(walletRepo, orderRepo, userRepo, nil, settingSvc)
+	refundRecordRepo := repository.NewOrderRefundRecordRepository(db)
+	walletSvc := service.NewWalletService(walletRepo, orderRepo, refundRecordRepo, userRepo, nil, settingSvc)
 	giftCardSvc := service.NewGiftCardService(giftCardRepo, userRepo, walletSvc, settingSvc)
 	userAuthSvc := service.NewUserAuthService(&config.Config{}, userRepo, identityRepo, emailVerifyRepo, nil, nil, nil)
 

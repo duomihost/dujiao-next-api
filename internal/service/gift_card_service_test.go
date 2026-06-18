@@ -40,7 +40,7 @@ func setupGiftCardServiceTest(t *testing.T) (*GiftCardService, *WalletService, *
 	userRepo := repository.NewUserRepository(db)
 	settingRepo := repository.NewSettingRepository(db)
 	settingSvc := NewSettingService(settingRepo)
-	walletSvc := NewWalletService(repository.NewWalletRepository(db), repository.NewOrderRepository(db), userRepo, nil, settingSvc)
+	walletSvc := NewWalletService(repository.NewWalletRepository(db), repository.NewOrderRepository(db), repository.NewOrderRefundRecordRepository(db), userRepo, nil, settingSvc)
 	giftSvc := NewGiftCardService(repository.NewGiftCardRepository(db), userRepo, walletSvc, settingSvc)
 	return giftSvc, walletSvc, db
 }

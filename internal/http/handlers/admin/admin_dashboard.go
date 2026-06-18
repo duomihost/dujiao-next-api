@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
@@ -119,7 +118,6 @@ func parseDashboardQuery(c *gin.Context) (service.DashboardQueryInput, error) {
 	fromRaw := strings.TrimSpace(c.Query("from"))
 	toRaw := strings.TrimSpace(c.Query("to"))
 	timezone := strings.TrimSpace(c.Query("tz"))
-	forceRefreshRaw := strings.TrimSpace(c.Query("force_refresh"))
 
 	from, err := shared.ParseTimeNullable(fromRaw)
 	if err != nil {
@@ -130,13 +128,9 @@ func parseDashboardQuery(c *gin.Context) (service.DashboardQueryInput, error) {
 		return service.DashboardQueryInput{}, err
 	}
 
-	forceRefresh := false
-	if forceRefreshRaw != "" {
-		parsed, err := strconv.ParseBool(forceRefreshRaw)
-		if err != nil {
-			return service.DashboardQueryInput{}, err
-		}
-		forceRefresh = parsed
+	forceRefresh, err := shared.ParseQueryBool(c, "force_refresh")
+	if err != nil {
+		return service.DashboardQueryInput{}, err
 	}
 
 	return service.DashboardQueryInput{

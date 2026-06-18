@@ -14,92 +14,6 @@ import (
 	"gorm.io/gorm"
 )
 
-// --- appendExchangeInfo unit tests ---
-
-func TestAppendExchangeInfoUpdatesAmountAndPayload(t *testing.T) {
-	payment := &models.Payment{
-		Amount:   models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
-		Currency: "USD",
-	}
-	appendExchangeInfo(payment, "72.00", "7.2", "10.00", "USD")
-
-	if payment.Amount.String() != "72.00" {
-		t.Errorf("Amount = %s, want 72.00", payment.Amount.String())
-	}
-	if payment.ProviderPayload["exchange_rate"] != "7.2" {
-		t.Errorf("exchange_rate = %v, want 7.2", payment.ProviderPayload["exchange_rate"])
-	}
-	if payment.ProviderPayload["original_amount"] != "10.00" {
-		t.Errorf("original_amount = %v, want 10.00", payment.ProviderPayload["original_amount"])
-	}
-	if payment.ProviderPayload["original_currency"] != "USD" {
-		t.Errorf("original_currency = %v, want USD", payment.ProviderPayload["original_currency"])
-	}
-}
-
-func TestAppendExchangeInfoNilPayload(t *testing.T) {
-	payment := &models.Payment{
-		Amount:          models.NewMoneyFromDecimal(decimal.NewFromInt(5)),
-		Currency:        "USD",
-		ProviderPayload: nil,
-	}
-	appendExchangeInfo(payment, "36.00", "7.2", "5.00", "USD")
-
-	if payment.ProviderPayload == nil {
-		t.Fatal("ProviderPayload should not be nil after appendExchangeInfo")
-	}
-	if payment.Amount.String() != "36.00" {
-		t.Errorf("Amount = %s, want 36.00", payment.Amount.String())
-	}
-}
-
-func TestAppendExchangeInfoPreservesExistingPayload(t *testing.T) {
-	payment := &models.Payment{
-		Amount:   models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
-		Currency: "USD",
-		ProviderPayload: models.JSON{
-			"trade_no": "T123456",
-		},
-	}
-	appendExchangeInfo(payment, "72.00", "7.2", "10.00", "USD")
-
-	if payment.ProviderPayload["trade_no"] != "T123456" {
-		t.Errorf("existing payload field trade_no lost")
-	}
-	if payment.ProviderPayload["original_amount"] != "10.00" {
-		t.Errorf("original_amount = %v, want 10.00", payment.ProviderPayload["original_amount"])
-	}
-}
-
-func TestAppendExchangeInfoInvalidConvertedAmount(t *testing.T) {
-	payment := &models.Payment{
-		Amount:   models.NewMoneyFromDecimal(decimal.NewFromInt(10)),
-		Currency: "USD",
-	}
-	appendExchangeInfo(payment, "invalid", "7.2", "10.00", "USD")
-
-	// Amount should remain unchanged when convertedAmount is invalid
-	if payment.Amount.String() != "10.00" {
-		t.Errorf("Amount = %s, want 10.00 (unchanged)", payment.Amount.String())
-	}
-	// But payload should still be written
-	if payment.ProviderPayload["original_amount"] != "10.00" {
-		t.Errorf("original_amount should still be recorded")
-	}
-}
-
-func TestAppendExchangeInfoFractionalAmount(t *testing.T) {
-	payment := &models.Payment{
-		Amount:   models.NewMoneyFromDecimal(decimal.RequireFromString("9.99")),
-		Currency: "USD",
-	}
-	appendExchangeInfo(payment, "72.43", "7.25", "9.99", "USD")
-
-	if payment.Amount.String() != "72.43" {
-		t.Errorf("Amount = %s, want 72.43", payment.Amount.String())
-	}
-}
-
 // --- Integration tests: exchange rate with callback verification ---
 
 func setupExchangeTest(t *testing.T) (*PaymentService, *gorm.DB) {
@@ -133,7 +47,8 @@ func setupExchangeTest(t *testing.T) (*PaymentService, *gorm.DB) {
 	channelRepo := repository.NewPaymentChannelRepository(db)
 	walletRepo := repository.NewWalletRepository(db)
 	userRepo := repository.NewUserRepository(db)
-	walletSvc := NewWalletService(walletRepo, orderRepo, userRepo, nil, nil)
+	refundRecordRepo := repository.NewOrderRefundRecordRepository(db)
+	walletSvc := NewWalletService(walletRepo, orderRepo, refundRecordRepo, userRepo, nil, nil)
 	paymentSvc := NewPaymentService(PaymentServiceOptions{
 		OrderRepo:      orderRepo,
 		ProductRepo:    productRepo,

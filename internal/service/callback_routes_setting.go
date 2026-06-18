@@ -12,6 +12,7 @@ import (
 // CallbackRoutesSetting 回调路由配置
 type CallbackRoutesSetting struct {
 	PaymentCallback  string
+	DujiaoPayWebhook string
 	PaypalWebhook    string
 	StripeWebhook    string
 	UpstreamCallback string
@@ -19,7 +20,7 @@ type CallbackRoutesSetting struct {
 
 // HasCustomRoutes 返回是否设置了任何自定义回调路由
 func (s *CallbackRoutesSetting) HasCustomRoutes() bool {
-	return s.PaymentCallback != "" || s.PaypalWebhook != "" ||
+	return s.PaymentCallback != "" || s.DujiaoPayWebhook != "" || s.PaypalWebhook != "" ||
 		s.StripeWebhook != "" || s.UpstreamCallback != ""
 }
 
@@ -27,6 +28,7 @@ func (s *CallbackRoutesSetting) HasCustomRoutes() bool {
 func callbackRoutesSettingFromJSON(value models.JSON) CallbackRoutesSetting {
 	return CallbackRoutesSetting{
 		PaymentCallback:  normalizeCallbackRoutePath(readString(value, constants.SettingFieldPaymentCallback, "")),
+		DujiaoPayWebhook: normalizeCallbackRoutePath(readString(value, constants.SettingFieldDujiaoPayWebhook, "")),
 		PaypalWebhook:    normalizeCallbackRoutePath(readString(value, constants.SettingFieldPaypalWebhook, "")),
 		StripeWebhook:    normalizeCallbackRoutePath(readString(value, constants.SettingFieldStripeWebhook, "")),
 		UpstreamCallback: normalizeCallbackRoutePath(readString(value, constants.SettingFieldUpstreamCallback, "")),
@@ -37,6 +39,7 @@ func callbackRoutesSettingFromJSON(value models.JSON) CallbackRoutesSetting {
 func CallbackRoutesSettingToMap(s CallbackRoutesSetting) models.JSON {
 	return models.JSON{
 		constants.SettingFieldPaymentCallback:  s.PaymentCallback,
+		constants.SettingFieldDujiaoPayWebhook: s.DujiaoPayWebhook,
 		constants.SettingFieldPaypalWebhook:    s.PaypalWebhook,
 		constants.SettingFieldStripeWebhook:    s.StripeWebhook,
 		constants.SettingFieldUpstreamCallback: s.UpstreamCallback,
@@ -99,6 +102,7 @@ func deduplicateCallbackRoutes(s *CallbackRoutesSetting) {
 	seen := make(map[string]bool, 4)
 	fields := []*string{
 		&s.PaymentCallback,
+		&s.DujiaoPayWebhook,
 		&s.PaypalWebhook,
 		&s.StripeWebhook,
 		&s.UpstreamCallback,

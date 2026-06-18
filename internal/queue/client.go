@@ -59,7 +59,13 @@ func (c *Client) EnqueueOrderStatusEmail(payload OrderStatusEmailPayload, opts .
 	if err != nil {
 		return err
 	}
-	options := append([]asynq.Option{asynq.Queue(c.defaultQueue)}, opts...)
+	// 限制重试次数与保留期，避免 SMTP 长时间不可用时邮件任务堆积成雪崩；
+	// 调用方可通过 opts 覆盖。
+	options := append([]asynq.Option{
+		asynq.Queue(c.defaultQueue),
+		asynq.MaxRetry(3),
+		asynq.Retention(24 * time.Hour),
+	}, opts...)
 	_, err = c.client.Enqueue(task, options...)
 	return err
 }

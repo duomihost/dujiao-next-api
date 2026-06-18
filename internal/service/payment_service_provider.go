@@ -1,7 +1,6 @@
 package service
 
 import (
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,31 +8,10 @@ import (
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/models"
-	"github.com/dujiao-next/internal/payment/alipay"
-	"github.com/dujiao-next/internal/payment/epay"
-	"github.com/dujiao-next/internal/payment/epusdt"
-	"github.com/dujiao-next/internal/payment/okpay"
-	"github.com/dujiao-next/internal/payment/paypal"
-	"github.com/dujiao-next/internal/payment/stripe"
-	"github.com/dujiao-next/internal/payment/tokenpay"
-	"github.com/dujiao-next/internal/payment/wechatpay"
+	"github.com/dujiao-next/internal/payment/provider"
 
 	"github.com/shopspring/decimal"
 )
-
-// appendExchangeInfo 将 payment.Amount 更新为转换后金额（与网关实际交互的金额），
-// 原始金额记录到 ProviderPayload 用于审计追踪。
-func appendExchangeInfo(payment *models.Payment, convertedAmount, exchangeRate, originalAmount, originalCurrency string) {
-	if d, err := decimal.NewFromString(convertedAmount); err == nil {
-		payment.Amount = models.Money{Decimal: d}
-	}
-	if payment.ProviderPayload == nil {
-		payment.ProviderPayload = models.JSON{}
-	}
-	payment.ProviderPayload["exchange_rate"] = strings.TrimSpace(exchangeRate)
-	payment.ProviderPayload["original_amount"] = originalAmount
-	payment.ProviderPayload["original_currency"] = originalCurrency
-}
 
 func (s *PaymentService) applyProviderPayment(input CreatePaymentInput, order *models.Order, channel *models.PaymentChannel, payment *models.Payment) (err error) {
 	providerType := strings.ToLower(strings.TrimSpace(channel.ProviderType))
@@ -59,487 +37,91 @@ func (s *PaymentService) applyProviderPayment(input CreatePaymentInput, order *m
 		}
 		log.Infow("payment_provider_apply_success")
 	}()
-	switch providerType {
-	case constants.PaymentProviderEpay:
-		if !epay.IsSupportedChannelType(channel.ChannelType) {
-			return fmt.Errorf("%w: unsupported channel_type %s", ErrPaymentChannelConfigInvalid, channel.ChannelType)
-		}
-		cfg, err := epay.ParseConfig(channel.ConfigJSON)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		if err := epay.ValidateConfig(cfg); err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		originalAmount := payment.Amount.String()
-		originalCurrency := payment.Currency
-		payAmount := originalAmount
-		payCurrency := originalCurrency
-		if cfg.NeedsCurrencyConversion() {
-			converted, targetCur, convErr := cfg.ConvertAmount(payAmount, payCurrency, 2)
-			if convErr != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, convErr)
-			}
-			payAmount = converted
-			payCurrency = targetCur
-			payment.Currency = payCurrency
-		}
-		notifyURL := strings.TrimSpace(cfg.NotifyURL)
-		returnURL := appendURLQuery(cfg.ReturnURL, buildPaymentReturnQuery(input, order, "epay_return", ""))
-		subject := buildOrderSubject(order)
-		createInput := epay.CreateInput{
-			OrderNo:     providerOrderNo,
-			Amount:      payAmount,
-			Subject:     subject,
-			ChannelType: channel.ChannelType,
-			ClientIP:    strings.TrimSpace(input.ClientIP),
-			NotifyURL:   notifyURL,
-			ReturnURL:   returnURL,
-		}
-		if notifyURL == "" || returnURL == "" {
-			return fmt.Errorf("%w: notify_url/return_url is required", ErrPaymentChannelConfigInvalid)
-		}
-		mode := strings.ToLower(strings.TrimSpace(channel.InteractionMode))
-		if mode == constants.PaymentInteractionRedirect {
-			result, err := epay.BuildRedirectURL(cfg, createInput)
-			if err != nil {
-				switch {
-				case errors.Is(err, epay.ErrConfigInvalid), errors.Is(err, epay.ErrChannelTypeNotOK), errors.Is(err, epay.ErrSignatureGenerate):
-					return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-				default:
-					return ErrPaymentGatewayRequestFailed
-				}
-			}
-			payment.PayURL = result.PayURL
-			payment.QRCode = ""
-			if result.Raw != nil {
-				payment.ProviderPayload = models.JSON(result.Raw)
-			}
-			if cfg.NeedsCurrencyConversion() {
-				appendExchangeInfo(payment, payAmount, cfg.ExchangeRate, originalAmount, originalCurrency)
-			}
-			payment.UpdatedAt = time.Now()
-			if err := s.paymentRepo.Update(payment); err != nil {
-				return ErrPaymentUpdateFailed
-			}
-			return nil
-		}
-		if mode != "" && mode != constants.PaymentInteractionQR {
-			return ErrPaymentChannelConfigInvalid
-		}
-		result, err := epay.CreatePayment(gatewayCtx, cfg, createInput)
-		if err != nil {
-			switch {
-			case errors.Is(err, epay.ErrConfigInvalid), errors.Is(err, epay.ErrChannelTypeNotOK), errors.Is(err, epay.ErrSignatureGenerate):
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			case errors.Is(err, epay.ErrRequestFailed):
-				return ErrPaymentGatewayRequestFailed
-			case errors.Is(err, epay.ErrResponseInvalid):
-				return ErrPaymentGatewayResponseInvalid
-			default:
-				return ErrPaymentGatewayRequestFailed
-			}
-		}
-		payment.PayURL = result.PayURL
-		payment.QRCode = result.QRCode
-		if result.TradeNo != "" {
-			payment.ProviderRef = result.TradeNo
-		}
-		if result.Raw != nil {
-			payment.ProviderPayload = models.JSON(result.Raw)
-		}
-		if cfg.NeedsCurrencyConversion() {
-			appendExchangeInfo(payment, payAmount, cfg.ExchangeRate, originalAmount, originalCurrency)
-		}
-		payment.UpdatedAt = time.Now()
-		if err := s.paymentRepo.Update(payment); err != nil {
-			return ErrPaymentUpdateFailed
-		}
-		return nil
-	case constants.PaymentProviderEpusdt:
-		cfg, err := epusdt.ParseConfig(channel.ConfigJSON)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		// 如果配置中没有指定 trade_type，根据 channel_type 自动设置
-		if strings.TrimSpace(cfg.TradeType) == "" {
-			cfg.TradeType = epusdt.ResolveTradeType(channel.ChannelType)
-		}
-		if err := epusdt.ValidateConfig(cfg); err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		notifyURL := strings.TrimSpace(cfg.NotifyURL)
-		returnURL := strings.TrimSpace(cfg.ReturnURL)
-		if notifyURL == "" || returnURL == "" {
-			return fmt.Errorf("%w: notify_url/return_url is required", ErrPaymentChannelConfigInvalid)
-		}
-		returnURL = appendURLQuery(returnURL, buildPaymentReturnQuery(input, order, "epusdt_return", ""))
-		subject := buildOrderSubject(order)
-		result, err := epusdt.CreatePayment(gatewayCtx, cfg, epusdt.CreateInput{
-			OrderNo:   providerOrderNo,
-			Amount:    payment.Amount.String(),
-			Name:      subject,
-			NotifyURL: notifyURL,
-			ReturnURL: returnURL,
-		})
-		if err != nil {
-			switch {
-			case errors.Is(err, epusdt.ErrConfigInvalid):
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			case errors.Is(err, epusdt.ErrRequestFailed):
-				return ErrPaymentGatewayRequestFailed
-			case errors.Is(err, epusdt.ErrResponseInvalid):
-				return ErrPaymentGatewayResponseInvalid
-			default:
-				return ErrPaymentGatewayRequestFailed
-			}
-		}
-		payment.PayURL = result.PaymentURL
-		payment.QRCode = result.PaymentURL
-		if result.TradeID != "" {
-			payment.ProviderRef = result.TradeID
-		}
-		if result.Raw != nil {
-			payment.ProviderPayload = models.JSON(result.Raw)
-		}
-		payment.UpdatedAt = time.Now()
-		if err := s.paymentRepo.Update(payment); err != nil {
-			return ErrPaymentUpdateFailed
-		}
-		return nil
-	case constants.PaymentProviderOkpay:
-		if !okpay.IsSupportedChannelType(channel.ChannelType) {
-			return fmt.Errorf("%w: unsupported channel_type %s", ErrPaymentChannelConfigInvalid, channel.ChannelType)
-		}
-		cfg, err := okpay.ParseConfig(channel.ConfigJSON)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		if strings.TrimSpace(cfg.Coin) == "" {
-			cfg.Coin = okpay.ResolveCoin(channel.ChannelType)
-		}
-		if err := okpay.ValidateConfig(cfg); err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		returnURL := appendURLQuery(strings.TrimSpace(cfg.ReturnURL), buildPaymentReturnQuery(input, order, "okpay_return", ""))
-		createResult, err := okpay.CreatePayment(gatewayCtx, cfg, okpay.CreateInput{
-			UniqueID:    providerOrderNo,
-			Name:        buildOrderSubject(order),
-			Amount:      payment.Amount.String(),
-			ReturnURL:   returnURL,
-			CallbackURL: strings.TrimSpace(cfg.CallbackURL),
-			Coin:        strings.TrimSpace(cfg.Coin),
-			Status:      strings.TrimSpace(cfg.Status),
-		})
-		if err != nil {
-			switch {
-			case errors.Is(err, okpay.ErrConfigInvalid):
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			case errors.Is(err, okpay.ErrRequestFailed):
-				return ErrPaymentGatewayRequestFailed
-			case errors.Is(err, okpay.ErrResponseInvalid):
-				return ErrPaymentGatewayResponseInvalid
-			default:
-				return ErrPaymentGatewayRequestFailed
-			}
-		}
-		payment.PayURL = strings.TrimSpace(createResult.PayURL)
-		payment.QRCode = strings.TrimSpace(createResult.PayURL)
-		payment.Status = constants.PaymentStatusPending
-		payment.ProviderRef = pickFirstNonEmpty(strings.TrimSpace(createResult.OrderID), strings.TrimSpace(payment.ProviderRef), order.OrderNo)
-		if createResult.Raw != nil {
-			providerPayload := models.JSON(createResult.Raw)
-			if convertedAmount, convertErr := okpay.ConvertAmountByRate(payment.Amount.String(), cfg.ExchangeRate); convertErr == nil {
-				providerPayload["converted_amount"] = convertedAmount.StringFixed(8)
-				providerPayload["exchange_rate"] = strings.TrimSpace(cfg.ExchangeRate)
-			}
-			payment.ProviderPayload = providerPayload
-		}
-		payment.UpdatedAt = time.Now()
-		if err := s.paymentRepo.Update(payment); err != nil {
-			return ErrPaymentUpdateFailed
-		}
-		return nil
-	case constants.PaymentProviderTokenpay:
-		cfg, err := tokenpay.ParseConfig(channel.ConfigJSON)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		if strings.TrimSpace(cfg.Currency) == "" {
-			cfg.Currency = tokenpay.DefaultCurrency
-		}
-		if strings.TrimSpace(cfg.NotifyURL) == "" {
-			return fmt.Errorf("%w: notify_url is required", ErrPaymentChannelConfigInvalid)
-		}
-		if err := tokenpay.ValidateConfig(cfg); err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		redirectURL := strings.TrimSpace(cfg.RedirectURL)
-		if redirectURL != "" {
-			redirectURL = appendURLQuery(redirectURL, buildPaymentReturnQuery(input, order, "tokenpay_return", ""))
-		}
-		createResult, err := tokenpay.CreatePayment(gatewayCtx, cfg, tokenpay.CreateInput{
-			OutOrderID:   providerOrderNo,
-			OrderUserKey: resolveTokenPayOrderUserKey(order),
-			ActualAmount: payment.Amount.String(),
-			Currency:     strings.TrimSpace(cfg.Currency),
-			NotifyURL:    strings.TrimSpace(cfg.NotifyURL),
-			RedirectURL:  redirectURL,
-		})
-		if err != nil {
-			switch {
-			case errors.Is(err, tokenpay.ErrConfigInvalid):
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			case errors.Is(err, tokenpay.ErrRequestFailed):
-				return ErrPaymentGatewayRequestFailed
-			case errors.Is(err, tokenpay.ErrResponseInvalid):
-				return ErrPaymentGatewayResponseInvalid
-			default:
-				return ErrPaymentGatewayRequestFailed
-			}
-		}
-		payment.PayURL = strings.TrimSpace(pickFirstNonEmpty(createResult.PayURL, createResult.QRCodeLink))
-		payment.QRCode = strings.TrimSpace(pickFirstNonEmpty(createResult.QRCodeBase64, createResult.QRCodeLink, createResult.PayURL))
-		payment.Status = constants.PaymentStatusPending
-		payment.ProviderRef = pickFirstNonEmpty(strings.TrimSpace(createResult.TokenOrderID), strings.TrimSpace(payment.ProviderRef), order.OrderNo)
-		if createResult.Raw != nil {
-			payment.ProviderPayload = models.JSON(createResult.Raw)
-		}
-		payment.UpdatedAt = time.Now()
-		if err := s.paymentRepo.Update(payment); err != nil {
-			return ErrPaymentUpdateFailed
-		}
-		return nil
-	case constants.PaymentProviderOfficial:
-		channelType = strings.ToLower(strings.TrimSpace(channel.ChannelType))
-		switch channelType {
-		case constants.PaymentChannelTypePaypal:
-			cfg, err := paypal.ParseConfig(channel.ConfigJSON)
-			if err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			if err := paypal.ValidateConfig(cfg); err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			payAmount := payment.Amount.String()
-			payCurrency := payment.Currency
-			if cfg.NeedsCurrencyConversion() {
-				converted, targetCur, convErr := cfg.ConvertAmount(payAmount, payCurrency)
-				if convErr != nil {
-					return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, convErr)
-				}
-				payAmount = converted
-				payCurrency = targetCur
-			}
-			createResult, err := paypal.CreateOrder(gatewayCtx, cfg, paypal.CreateInput{
-				OrderNo:     providerOrderNo,
-				Amount:      payAmount,
-				Currency:    payCurrency,
-				Description: buildOrderSubject(order),
-				ReturnURL:   appendURLQuery(cfg.ReturnURL, buildPaymentReturnQuery(input, order, "pp_return", "")),
-				CancelURL:   appendURLQuery(cfg.CancelURL, buildPaymentReturnQuery(input, order, "pp_cancel", "")),
-			})
-			if err != nil {
-				switch {
-				case errors.Is(err, paypal.ErrConfigInvalid):
-					return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-				case errors.Is(err, paypal.ErrAuthFailed), errors.Is(err, paypal.ErrRequestFailed):
-					return ErrPaymentGatewayRequestFailed
-				case errors.Is(err, paypal.ErrResponseInvalid):
-					return ErrPaymentGatewayResponseInvalid
-				default:
-					return ErrPaymentGatewayRequestFailed
-				}
-			}
-			payment.PayURL = strings.TrimSpace(createResult.ApprovalURL)
-			payment.QRCode = ""
-			payment.Status = constants.PaymentStatusPending
-			payment.ProviderRef = strings.TrimSpace(createResult.OrderID)
-			if createResult.Raw != nil {
-				payment.ProviderPayload = models.JSON(createResult.Raw)
-			}
-			if cfg.NeedsCurrencyConversion() {
-				appendExchangeInfo(payment, payAmount, cfg.ExchangeRate, payment.Amount.String(), payment.Currency)
-				payment.Currency = payCurrency
-			}
-			payment.UpdatedAt = time.Now()
-			if err := s.paymentRepo.Update(payment); err != nil {
-				return ErrPaymentUpdateFailed
-			}
-			return nil
-		case constants.PaymentChannelTypeAlipay:
-			cfg, err := alipay.ParseConfig(channel.ConfigJSON)
-			if err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			if err := alipay.ValidateConfig(cfg, channel.InteractionMode); err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			originalAmount := payment.Amount.String()
-			originalCurrency := payment.Currency
-			payAmount := originalAmount
-			payCurrency := originalCurrency
-			if cfg.NeedsCurrencyConversion() {
-				converted, targetCur, convErr := cfg.ConvertAmount(payAmount, payCurrency, 2)
-				if convErr != nil {
-					return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, convErr)
-				}
-				payAmount = converted
-				payCurrency = targetCur
-			} else {
-				payCurrency = "CNY"
-			}
-			payment.Currency = payCurrency
-			createResult, err := alipay.CreatePayment(gatewayCtx, cfg, alipay.CreateInput{
-				OrderNo:   providerOrderNo,
-				Amount:    payAmount,
-				Subject:   buildOrderSubject(order),
-				NotifyURL: cfg.NotifyURL,
-				ReturnURL: appendURLQuery(cfg.ReturnURL, buildPaymentReturnQuery(input, order, "alipay_return", "")),
-			}, channel.InteractionMode)
-			if err != nil {
-				switch {
-				case errors.Is(err, alipay.ErrConfigInvalid), errors.Is(err, alipay.ErrSignGenerate):
-					return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-				case errors.Is(err, alipay.ErrRequestFailed):
-					return ErrPaymentGatewayRequestFailed
-				case errors.Is(err, alipay.ErrResponseInvalid):
-					return ErrPaymentGatewayResponseInvalid
-				default:
-					return ErrPaymentGatewayRequestFailed
-				}
-			}
-			payment.PayURL = strings.TrimSpace(createResult.PayURL)
-			payment.QRCode = strings.TrimSpace(createResult.QRCode)
-			payment.Status = constants.PaymentStatusPending
-			payment.ProviderRef = pickFirstNonEmpty(strings.TrimSpace(createResult.TradeNo), strings.TrimSpace(createResult.OutTradeNo), order.OrderNo)
-			if createResult.Raw != nil {
-				payment.ProviderPayload = models.JSON(createResult.Raw)
-			}
-			if cfg.NeedsCurrencyConversion() {
-				appendExchangeInfo(payment, payAmount, cfg.ExchangeRate, originalAmount, originalCurrency)
-			}
-			payment.UpdatedAt = time.Now()
-			if err := s.paymentRepo.Update(payment); err != nil {
-				return ErrPaymentUpdateFailed
-			}
-			return nil
-		case constants.PaymentChannelTypeWechat:
-			cfg, err := wechatpay.ParseConfig(channel.ConfigJSON)
-			if err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			if err := wechatpay.ValidateConfig(cfg, channel.InteractionMode); err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			originalAmount := payment.Amount.String()
-			originalCurrency := payment.Currency
-			payAmount := originalAmount
-			payCurrency := originalCurrency
-			if cfg.NeedsCurrencyConversion() {
-				converted, targetCur, convErr := cfg.ConvertAmount(payAmount, payCurrency, 2)
-				if convErr != nil {
-					return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, convErr)
-				}
-				payAmount = converted
-				payCurrency = targetCur
-			} else {
-				payCurrency = "CNY"
-			}
-			payment.Currency = payCurrency
-			cfgForCreate := *cfg
-			cfgForCreate.H5RedirectURL = appendURLQuery(cfg.H5RedirectURL, buildPaymentReturnQuery(input, order, "wechat_return", ""))
-			createResult, err := wechatpay.CreatePayment(gatewayCtx, &cfgForCreate, wechatpay.CreateInput{
-				OrderNo:     providerOrderNo,
-				Amount:      payAmount,
-				Currency:    payCurrency,
-				Description: buildOrderSubject(order),
-				ClientIP:    strings.TrimSpace(input.ClientIP),
-				NotifyURL:   cfg.NotifyURL,
-			}, channel.InteractionMode)
-			if err != nil {
-				switch {
-				case errors.Is(err, wechatpay.ErrConfigInvalid):
-					return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-				case errors.Is(err, wechatpay.ErrRequestFailed):
-					return ErrPaymentGatewayRequestFailed
-				case errors.Is(err, wechatpay.ErrResponseInvalid):
-					return ErrPaymentGatewayResponseInvalid
-				default:
-					return ErrPaymentGatewayRequestFailed
-				}
-			}
-			payment.PayURL = strings.TrimSpace(createResult.PayURL)
-			payment.QRCode = strings.TrimSpace(createResult.QRCode)
-			payment.Status = constants.PaymentStatusPending
-			payment.ProviderRef = pickFirstNonEmpty(strings.TrimSpace(payment.ProviderRef), order.OrderNo)
-			if createResult.Raw != nil {
-				payment.ProviderPayload = models.JSON(createResult.Raw)
-			}
-			if cfg.NeedsCurrencyConversion() {
-				appendExchangeInfo(payment, payAmount, cfg.ExchangeRate, originalAmount, originalCurrency)
-			}
-			payment.UpdatedAt = time.Now()
-			if err := s.paymentRepo.Update(payment); err != nil {
-				return ErrPaymentUpdateFailed
-			}
-			return nil
-		case constants.PaymentChannelTypeStripe:
-			cfg, err := stripe.ParseConfig(channel.ConfigJSON)
-			if err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			if err := stripe.ValidateConfig(cfg); err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			originalAmount := payment.Amount.String()
-			originalCurrency := payment.Currency
-			payAmount := originalAmount
-			payCurrency := originalCurrency
-			if cfg.NeedsCurrencyConversion() {
-				converted, targetCur, convErr := cfg.ConvertAmount(payAmount, payCurrency, 2)
-				if convErr != nil {
-					return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, convErr)
-				}
-				payAmount = converted
-				payCurrency = targetCur
-				payment.Currency = payCurrency
-			}
-			createResult, err := stripe.CreatePayment(gatewayCtx, cfg, stripe.CreateInput{
-				OrderNo:     providerOrderNo,
-				Amount:      payAmount,
-				Currency:    payCurrency,
-				Description: buildOrderSubject(order),
-				SuccessURL:  appendURLQuery(cfg.SuccessURL, buildPaymentReturnQuery(input, order, "stripe_return", "{CHECKOUT_SESSION_ID}")),
-				CancelURL:   appendURLQuery(cfg.CancelURL, buildPaymentReturnQuery(input, order, "stripe_cancel", "")),
-			})
-			if err != nil {
-				return mapStripeGatewayError(err)
-			}
-			payment.PayURL = strings.TrimSpace(createResult.URL)
-			payment.QRCode = ""
-			payment.Status = constants.PaymentStatusPending
-			payment.ProviderRef = pickFirstNonEmpty(strings.TrimSpace(createResult.SessionID), strings.TrimSpace(createResult.PaymentIntentID), order.OrderNo)
-			if createResult.Raw != nil {
-				payment.ProviderPayload = models.JSON(createResult.Raw)
-			}
-			if cfg.NeedsCurrencyConversion() {
-				appendExchangeInfo(payment, payAmount, cfg.ExchangeRate, originalAmount, originalCurrency)
-			}
-			payment.UpdatedAt = time.Now()
-			if err := s.paymentRepo.Update(payment); err != nil {
-				return ErrPaymentUpdateFailed
-			}
-			return nil
-		default:
-			return ErrPaymentProviderNotSupported
-		}
-	default:
+	if s.paymentProviderRegistry == nil {
 		return ErrPaymentProviderNotSupported
 	}
+
+	p, ok := s.paymentProviderRegistry.Lookup(channel.ProviderType, channel.ChannelType)
+	if !ok {
+		return ErrPaymentProviderNotSupported
+	}
+
+	// 构造 provider.CreateInput。
+	// NotifyURL / ReturnURL 留空：各 adapter/native 包均实现 "input值 || cfg值" fallback，
+	// 空值时自动读取 channel.ConfigJSON 里配置的 notify_url / return_url。
+	// P1.2c Task 3: returnURLQuery 携带 biz_type/order_no/marker 等，由 wrapper append 到 ReturnURL。
+	extra := models.JSON{}
+	if interactionMode := strings.TrimSpace(channel.InteractionMode); interactionMode != "" {
+		extra["interaction_mode"] = interactionMode
+	}
+	// order_user_key 是 tokenpay 必须的稳定用户标识符；其他 adapter 忽略此字段。
+	extra["order_user_key"] = resolveTokenPayOrderUserKey(order)
+
+	// P1.2c Task 3: 构造 return URL tracking marker。
+	// official provider 用 channelType 区分网关(paypal/alipay/wechat/stripe)，其他 provider 用 providerType。
+	returnMarker := providerType + "_return"
+	if providerType == constants.PaymentProviderOfficial {
+		returnMarker = channelType + "_return"
+	}
+	returnURLQuery := buildPaymentReturnQuery(input, order, returnMarker, "")
+
+	createInput := provider.CreateInput{
+		PaymentID:      payment.ID,
+		OrderID:        order.ID,
+		OrderNo:        providerOrderNo,
+		Subject:        buildOrderSubject(order),
+		Amount:         payment.Amount,
+		Currency:       payment.Currency,
+		ClientIP:       strings.TrimSpace(input.ClientIP),
+		ChannelType:    channel.ChannelType,
+		Extra:          extra,
+		ReturnURLQuery: returnURLQuery,
+		// NotifyURL / ReturnURL 留空，由各 adapter 从 cfg 读取，再 append ReturnURLQuery
+	}
+
+	result, err := p.CreatePayment(gatewayCtx, channel.ConfigJSON, createInput)
+	if err != nil {
+		return mapProviderErrorToService(err)
+	}
+
+	// 把 result 写回 payment 字段
+	payment.PayURL = strings.TrimSpace(result.RedirectURL)
+	payment.QRCode = strings.TrimSpace(result.QRCodeURL)
+	if result.ProviderRef != "" {
+		payment.ProviderRef = result.ProviderRef
+	}
+	// 确保 ProviderRef 始终有值（各 adapter 可能返回空，如 wechat CreatePayment 阶段）。
+	// 主动查询必须使用实际提交到网关的订单号，而不是业务订单号。
+	if payment.ProviderRef == "" {
+		payment.ProviderRef = providerOrderNo
+	}
+	if result.Payload != nil {
+		payment.ProviderPayload = result.Payload
+	}
+	// P1.2c: 用 wrapper 转换后的 amount/currency 更新 payment 记录，
+	// 保持 DB 状态与实际发给网关的金额/币种一致（P1.2c Task 1 把 conversion 下沉到 wrapper）。
+	if strings.TrimSpace(result.CurrencySent) != "" {
+		payment.Currency = result.CurrencySent
+	}
+	if strings.TrimSpace(result.AmountSent) != "" {
+		if d, parseErr := decimal.NewFromString(result.AmountSent); parseErr == nil {
+			payment.Amount = models.Money{Decimal: d}
+		}
+	}
+	payment.Status = constants.PaymentStatusPending
+	payment.UpdatedAt = time.Now()
+
+	if err := s.paymentRepo.Update(payment); err != nil {
+		return ErrPaymentUpdateFailed
+	}
+	return nil
 }
 
-// ValidateChannel 校验支付渠道配置
+// ValidateChannel 校验支付渠道配置（admin 端 channel 创建/更新时调用）。
+//
+// P1.2c Task 10: 160 行 switch 退化为 Registry.Lookup + Provider.ValidateConfig 单点。
+// 基础字段校验（nil / fee / amount / providerType / wallet 跳过）保留在 service 层；
+// 配置格式验证通过 Registry 委托给各 adapter wrapper。
 func (s *PaymentService) ValidateChannel(channel *models.PaymentChannel) error {
 	if channel == nil {
 		return ErrPaymentChannelConfigInvalid
@@ -563,143 +145,48 @@ func (s *PaymentService) ValidateChannel(channel *models.PaymentChannel) error {
 	if maxAmount.GreaterThan(decimal.Zero) && minAmount.GreaterThan(maxAmount) {
 		return ErrPaymentChannelConfigInvalid
 	}
+
 	providerType := strings.ToLower(strings.TrimSpace(channel.ProviderType))
-	switch providerType {
-	case constants.PaymentProviderEpay:
-		if !epay.IsSupportedChannelType(channel.ChannelType) {
-			return fmt.Errorf("%w: unsupported channel_type %s", ErrPaymentChannelConfigInvalid, channel.ChannelType)
-		}
+	channelType := strings.ToLower(strings.TrimSpace(channel.ChannelType))
+	if providerType == "" {
+		return ErrPaymentChannelConfigInvalid
+	}
+
+	// wallet 是内部余额通道，无 native adapter，直接通过。
+	if providerType == constants.PaymentProviderWallet {
+		return nil
+	}
+
+	// 非 official provider（epay/bepusdt/epusdt/okpay/tokenpay）只支持 qr/redirect。
+	// official provider 的 interaction_mode 验证由各 adapter 的 ValidateConfig 负责。
+	if providerType != constants.PaymentProviderOfficial {
 		mode := strings.ToLower(strings.TrimSpace(channel.InteractionMode))
 		if mode != constants.PaymentInteractionQR && mode != constants.PaymentInteractionRedirect {
 			return ErrPaymentChannelConfigInvalid
 		}
-		cfg, err := epay.ParseConfig(channel.ConfigJSON)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		if err := epay.ValidateConfig(cfg); err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		return nil
-	case constants.PaymentProviderEpusdt:
-		if !epusdt.IsSupportedChannelType(channel.ChannelType) {
-			return fmt.Errorf("%w: unsupported channel_type %s", ErrPaymentChannelConfigInvalid, channel.ChannelType)
-		}
-		if strings.ToLower(strings.TrimSpace(channel.InteractionMode)) != constants.PaymentInteractionRedirect &&
-			strings.ToLower(strings.TrimSpace(channel.InteractionMode)) != constants.PaymentInteractionQR {
-			return ErrPaymentChannelConfigInvalid
-		}
-		cfg, err := epusdt.ParseConfig(channel.ConfigJSON)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		if err := epusdt.ValidateConfig(cfg); err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		return nil
-	case constants.PaymentProviderOkpay:
-		if !okpay.IsSupportedChannelType(channel.ChannelType) {
-			return fmt.Errorf("%w: unsupported channel_type %s", ErrPaymentChannelConfigInvalid, channel.ChannelType)
-		}
-		mode := strings.ToLower(strings.TrimSpace(channel.InteractionMode))
-		if mode != constants.PaymentInteractionQR && mode != constants.PaymentInteractionRedirect {
-			return ErrPaymentChannelConfigInvalid
-		}
-		cfg, err := okpay.ParseConfig(channel.ConfigJSON)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		if strings.TrimSpace(cfg.Coin) == "" {
-			cfg.Coin = okpay.ResolveCoin(channel.ChannelType)
-		}
-		if err := okpay.ValidateConfig(cfg); err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		return nil
-	case constants.PaymentProviderTokenpay:
-		if strings.ToLower(strings.TrimSpace(channel.InteractionMode)) != constants.PaymentInteractionRedirect &&
-			strings.ToLower(strings.TrimSpace(channel.InteractionMode)) != constants.PaymentInteractionQR {
-			return ErrPaymentChannelConfigInvalid
-		}
-		cfg, err := tokenpay.ParseConfig(channel.ConfigJSON)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		if strings.TrimSpace(cfg.Currency) == "" {
-			cfg.Currency = tokenpay.DefaultCurrency
-		}
-		if strings.TrimSpace(cfg.NotifyURL) == "" {
-			return fmt.Errorf("%w: notify_url is required", ErrPaymentChannelConfigInvalid)
-		}
-		if err := tokenpay.ValidateConfig(cfg); err != nil {
-			return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		}
-		return nil
-	case constants.PaymentProviderOfficial:
-		channelType := strings.ToLower(strings.TrimSpace(channel.ChannelType))
-		switch channelType {
-		case constants.PaymentChannelTypePaypal:
-			if strings.ToLower(strings.TrimSpace(channel.InteractionMode)) != constants.PaymentInteractionRedirect {
-				return ErrPaymentChannelConfigInvalid
-			}
-			cfg, err := paypal.ParseConfig(channel.ConfigJSON)
-			if err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			if err := paypal.ValidateConfig(cfg); err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			return nil
-		case constants.PaymentChannelTypeAlipay:
-			cfg, err := alipay.ParseConfig(channel.ConfigJSON)
-			if err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			if err := alipay.ValidateConfig(cfg, channel.InteractionMode); err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			return nil
-		case constants.PaymentChannelTypeWechat:
-			cfg, err := wechatpay.ParseConfig(channel.ConfigJSON)
-			if err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			if err := wechatpay.ValidateConfig(cfg, channel.InteractionMode); err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			return nil
-		case constants.PaymentChannelTypeStripe:
-			if strings.ToLower(strings.TrimSpace(channel.InteractionMode)) != constants.PaymentInteractionRedirect {
-				return ErrPaymentChannelConfigInvalid
-			}
-			cfg, err := stripe.ParseConfig(channel.ConfigJSON)
-			if err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			if err := stripe.ValidateConfig(cfg); err != nil {
-				return fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			}
-			return nil
-		default:
-			return ErrPaymentProviderNotSupported
-		}
-	default:
+	}
+
+	if s.paymentProviderRegistry == nil {
 		return ErrPaymentProviderNotSupported
 	}
-}
-
-func mapPaypalStatus(status string) (string, bool) {
-	status = strings.ToUpper(strings.TrimSpace(status))
-	switch status {
-	case "COMPLETED":
-		return constants.PaymentStatusSuccess, true
-	case "PENDING", "APPROVED", "CREATED", "SAVED":
-		return constants.PaymentStatusPending, true
-	case "DECLINED", "DENIED", "FAILED", "VOIDED":
-		return constants.PaymentStatusFailed, true
-	default:
-		return "", false
+	p, ok := s.paymentProviderRegistry.Lookup(channel.ProviderType, channel.ChannelType)
+	if !ok {
+		return fmt.Errorf("%w: unsupported provider_type=%s channel_type=%s",
+			ErrPaymentChannelConfigInvalid, channel.ProviderType, channel.ChannelType)
 	}
+
+	// official provider：第二参数传 interactionMode，供 wechatpay/alipay adapter 验证。
+	// 非 official provider：第二参数传 channelType，供 epay/bepusdt/okpay adapter 验证 channel 类型。
+	var validateParam string
+	if providerType == constants.PaymentProviderOfficial {
+		validateParam = strings.ToLower(strings.TrimSpace(channel.InteractionMode))
+	} else {
+		validateParam = channelType
+	}
+	if err := p.ValidateConfig(channel.ConfigJSON, validateParam); err != nil {
+		return mapProviderErrorToService(err)
+	}
+	return nil
 }
 
 func resolveTokenPayOrderUserKey(order *models.Order) string {

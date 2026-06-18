@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/http/response"
@@ -31,26 +30,16 @@ type CreateCouponRequest struct {
 	IsActive     *bool    `json:"is_active"`
 }
 
-// CreateCoupon 创建优惠券
-func (h *Handler) CreateCoupon(c *gin.Context) {
-	var req CreateCouponRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		shared.RespondBindError(c, err)
-		return
-	}
-
+func buildCreateCouponInputFromRequest(req CreateCouponRequest) (service.CreateCouponInput, error) {
 	startsAt, err := shared.ParseTimeNullable(req.StartsAt)
 	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
+		return service.CreateCouponInput{}, err
 	}
 	endsAt, err := shared.ParseTimeNullable(req.EndsAt)
 	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
+		return service.CreateCouponInput{}, err
 	}
-
-	coupon, err := h.CouponAdminService.Create(service.CreateCouponInput{
+	return service.CreateCouponInput{
 		Code:         req.Code,
 		Type:         req.Type,
 		Value:        models.NewMoneyFromDecimal(decimal.NewFromFloat(req.Value)),
@@ -64,7 +53,32 @@ func (h *Handler) CreateCoupon(c *gin.Context) {
 		StartsAt:     startsAt,
 		EndsAt:       endsAt,
 		IsActive:     req.IsActive,
-	})
+	}, nil
+}
+
+func buildUpdateCouponInputFromRequest(req CreateCouponRequest) (service.UpdateCouponInput, error) {
+	input, err := buildCreateCouponInputFromRequest(req)
+	if err != nil {
+		return service.UpdateCouponInput{}, err
+	}
+	return service.UpdateCouponInput(input), nil
+}
+
+// CreateCoupon 创建优惠券
+func (h *Handler) CreateCoupon(c *gin.Context) {
+	var req CreateCouponRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		shared.RespondBindError(c, err)
+		return
+	}
+
+	input, err := buildCreateCouponInputFromRequest(req)
+	if err != nil {
+		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+		return
+	}
+
+	coupon, err := h.CouponAdminService.Create(input)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrCouponInvalid):
@@ -93,32 +107,13 @@ func (h *Handler) UpdateCoupon(c *gin.Context) {
 		return
 	}
 
-	startsAt, err := shared.ParseTimeNullable(req.StartsAt)
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
-	endsAt, err := shared.ParseTimeNullable(req.EndsAt)
+	input, err := buildUpdateCouponInputFromRequest(req)
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
 	}
 
-	coupon, err := h.CouponAdminService.Update(couponID, service.UpdateCouponInput{
-		Code:         req.Code,
-		Type:         req.Type,
-		Value:        models.NewMoneyFromDecimal(decimal.NewFromFloat(req.Value)),
-		MinAmount:    models.NewMoneyFromDecimal(decimal.NewFromFloat(req.MinAmount)),
-		MaxDiscount:  models.NewMoneyFromDecimal(decimal.NewFromFloat(req.MaxDiscount)),
-		UsageLimit:   req.UsageLimit,
-		PerUserLimit: req.PerUserLimit,
-		PaymentRoles: req.PaymentRoles,
-		MemberLevels: req.MemberLevels,
-		ScopeRefIDs:  req.ScopeRefIDs,
-		StartsAt:     startsAt,
-		EndsAt:       endsAt,
-		IsActive:     req.IsActive,
-	})
+	coupon, err := h.CouponAdminService.Update(couponID, input)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrCouponNotFound):
@@ -161,9 +156,7 @@ func (h *Handler) DeleteCoupon(c *gin.Context) {
 
 // GetAdminCoupons 获取优惠券列表
 func (h *Handler) GetAdminCoupons(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	code := c.Query("code")
 	id, err := shared.ParseQueryUint(c.Query("id"), true)
@@ -176,14 +169,10 @@ func (h *Handler) GetAdminCoupons(c *gin.Context) {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
 	}
-	var isActive *bool
-	if raw := c.Query("is_active"); raw != "" {
-		parsed, err := strconv.ParseBool(raw)
-		if err != nil {
-			shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-			return
-		}
-		isActive = &parsed
+	isActive, err := shared.ParseQueryBoolPtr(c, "is_active")
+	if err != nil {
+		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+		return
 	}
 
 	coupons, total, err := h.CouponAdminService.List(repository.CouponListFilter{

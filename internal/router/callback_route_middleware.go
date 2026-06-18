@@ -15,6 +15,7 @@ import (
 // defaultCallbackPaths 默认回调路径集合，用于在配置自定义路由后屏蔽默认路径
 var defaultCallbackPaths = map[string]bool{
 	constants.DefaultPaymentCallbackPath:  true,
+	constants.DefaultDujiaoPayWebhookPath: true,
 	constants.DefaultPaypalWebhookPath:    true,
 	constants.DefaultStripeWebhookPath:    true,
 	constants.DefaultUpstreamCallbackPath: true,
@@ -61,6 +62,12 @@ func CallbackRouteMiddleware(
 				c.Abort()
 				return
 			}
+		case routes.DujiaoPayWebhook:
+			if routes.DujiaoPayWebhook != "" && method == http.MethodPost {
+				publicHandler.DujiaoPayWebhook(c)
+				c.Abort()
+				return
+			}
 		case routes.PaypalWebhook:
 			if routes.PaypalWebhook != "" && method == http.MethodPost {
 				publicHandler.PaypalWebhook(c)
@@ -87,6 +94,8 @@ func CallbackRouteMiddleware(
 			switch path {
 			case constants.DefaultPaymentCallbackPath:
 				shouldBlock = routes.PaymentCallback != ""
+			case constants.DefaultDujiaoPayWebhookPath:
+				shouldBlock = routes.DujiaoPayWebhook != ""
 			case constants.DefaultPaypalWebhookPath:
 				shouldBlock = routes.PaypalWebhook != ""
 			case constants.DefaultStripeWebhookPath:

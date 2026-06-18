@@ -172,3 +172,82 @@ func (h *Handler) StripeWebhook(c *gin.Context) {
 		"status":     payment.Status,
 	})
 }
+
+// DujiaoPayWebhook DujiaoPay webhook 回调。
+func (h *Handler) DujiaoPayWebhook(c *gin.Context) {
+	log := shared.RequestLog(c)
+	var query DujiaoPayWebhookQuery
+	_ = c.ShouldBindQuery(&query)
+
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		log.Warnw("dujiaopay_webhook_body_read_failed", "channel_id", query.ChannelID, "error", err)
+		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+		return
+	}
+	log.Infow("dujiaopay_webhook_received",
+		"channel_id", query.ChannelID,
+		"client_ip", c.ClientIP(),
+		"body_size", len(body),
+		"dujiaopay_webhook_id", strings.TrimSpace(c.GetHeader("DJP-Webhook-ID")),
+		"dujiaopay_webhook_timestamp", strings.TrimSpace(c.GetHeader("DJP-Webhook-Timestamp")),
+		"dujiaopay_webhook_signature", truncateCallbackLogValue(strings.TrimSpace(c.GetHeader("DJP-Webhook-Signature"))),
+		"raw_body", callbackRawBodyForLog(body),
+	)
+	headers := make(map[string]string)
+	for key, values := range c.Request.Header {
+		if len(values) == 0 {
+			continue
+		}
+		headers[key] = values[0]
+	}
+
+	payment, eventType, err := h.PaymentService.HandleDujiaoPayWebhook(service.WebhookCallbackInput{
+		ChannelID: query.ChannelID,
+		Headers:   headers,
+		Body:      body,
+		Context:   c.Request.Context(),
+	})
+	if err != nil {
+		log.Warnw("dujiaopay_webhook_handle_failed",
+			"channel_id", query.ChannelID,
+			"event_type", eventType,
+			"error", err,
+		)
+		h.enqueuePaymentExceptionAlert(c, models.JSON{
+			"alert_type":  "dujiaopay_webhook_handle_failed",
+			"alert_level": "error",
+			"message":     strings.TrimSpace(err.Error()),
+			"provider":    constants.PaymentProviderDujiaoPay,
+		})
+		respondPaymentCallbackError(c, err)
+		return
+	}
+
+	if payment == nil {
+		log.Infow("dujiaopay_webhook_accepted_no_payment",
+			"channel_id", query.ChannelID,
+			"event_type", eventType,
+		)
+		response.Success(c, gin.H{
+			"accepted":   true,
+			"event_type": eventType,
+			"updated":    false,
+		})
+		return
+	}
+
+	log.Infow("dujiaopay_webhook_processed",
+		"channel_id", query.ChannelID,
+		"event_type", eventType,
+		"payment_id", payment.ID,
+		"status", payment.Status,
+	)
+	response.Success(c, gin.H{
+		"accepted":   true,
+		"event_type": eventType,
+		"updated":    true,
+		"payment_id": payment.ID,
+		"status":     payment.Status,
+	})
+}

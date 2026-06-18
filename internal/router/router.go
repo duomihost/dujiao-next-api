@@ -63,8 +63,12 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 	}
 
 	// 中间件
-	r.Use(gin.Recovery())
+	// RequestIDMiddleware 必须前置于 RecoveryMiddleware:
+	// 它本身不会 panic(仅做 uuid 生成 + c.Set + Header.Set),先注入 request_id 才能
+	// 保证 RecoveryMiddleware 在 panic 时拿到的 request_id 一定不为空——既用于日志关联,
+	// 也用于 response body 的 request_id 字段。
 	r.Use(RequestIDMiddleware())
+	r.Use(RecoveryMiddleware())
 	r.Use(LoggerMiddleware(log))
 	r.Use(CORSMiddleware(cfg.CORS))
 	r.Use(CallbackRouteMiddleware(c.SettingService, publicHandler, upstreamHandler))
@@ -72,11 +76,18 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 	// 静态文件服务（上传的图片）- 必须放在最前面
 	r.Static("/uploads", "./uploads")
 
+	// SEO 资源（动态生成）
+	r.GET("/sitemap.xml", publicHandler.GetSitemap)
+	r.GET("/robots.txt", publicHandler.GetRobots)
+
 	// API 路由组
 	apiV1 := r.Group("/api/v1")
 	{
+		storefront := apiV1.Group("")
+		storefront.Use(ResellerTenantMiddleware(c.ResellerDomainResolver))
+
 		// 公开接口
-		public := apiV1.Group("/public")
+		public := storefront.Group("/public")
 		{
 			public.GET("/config", publicHandler.GetConfig)
 			public.GET("/products", publicHandler.GetProducts)
@@ -91,7 +102,7 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 		}
 
 		// 游客接口
-		guest := apiV1.Group("/guest")
+		guest := storefront.Group("/guest")
 		{
 			guest.POST("/orders", publicHandler.CreateGuestOrder)
 			guest.POST("/orders/create-and-pay", publicHandler.CreateGuestOrderAndPay)
@@ -105,7 +116,7 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 		}
 
 		// 用户认证接口
-		auth := apiV1.Group("/auth")
+		auth := storefront.Group("/auth")
 		{
 			auth.POST("/send-verify-code", publicHandler.SendUserVerifyCode)
 			auth.POST("/register", publicHandler.UserRegister)
@@ -113,11 +124,13 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 			auth.POST("/login/verify-2fa", RateLimitMiddleware(redisClient, loginRule, KeyByIP), publicHandler.VerifyUser2FA)
 			auth.POST("/telegram/login", RateLimitMiddleware(redisClient, loginRule, KeyByIP), publicHandler.UserTelegramLogin)
 			auth.POST("/telegram/miniapp/login", RateLimitMiddleware(redisClient, loginRule, KeyByIP), publicHandler.UserTelegramMiniAppLogin)
+			auth.GET("/telegram/oidc/start", RateLimitMiddleware(redisClient, loginRule, KeyByIP), publicHandler.StartTelegramOIDCLogin)
+			auth.POST("/telegram/oidc/callback", RateLimitMiddleware(redisClient, loginRule, KeyByIP), publicHandler.TelegramOIDCLoginCallback)
 			auth.POST("/forgot-password", publicHandler.UserForgotPassword)
 		}
 
 		// 用户接口（需鉴权）
-		user := apiV1.Group("")
+		user := storefront.Group("")
 		user.Use(UserJWTAuthMiddleware(cfg.UserJWT.SecretKey, c.UserRepo))
 		{
 			user.GET("/me", publicHandler.GetCurrentUser)
@@ -127,6 +140,8 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 			user.GET("/me/telegram", publicHandler.GetMyTelegramBinding)
 			user.POST("/me/telegram/bind", publicHandler.BindMyTelegram)
 			user.POST("/me/telegram/miniapp/bind", publicHandler.BindMyTelegramMiniApp)
+			user.GET("/me/telegram/oidc/start", publicHandler.StartTelegramOIDCBind)
+			user.POST("/me/telegram/oidc/callback", publicHandler.TelegramOIDCBindCallback)
 			user.DELETE("/me/telegram/unbind", publicHandler.UnbindMyTelegram)
 			user.POST("/me/email/send-verify-code", publicHandler.SendChangeEmailCode)
 			user.POST("/me/email/change", publicHandler.ChangeEmail)
@@ -143,6 +158,7 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 			user.POST("/orders/preview", publicHandler.PreviewOrder)
 			user.POST("/order/payment-channels", publicHandler.GetOrderPaymentChannels)
 			user.GET("/orders", publicHandler.ListOrders)
+			user.GET("/orders/stats", publicHandler.OrderStats)
 			user.GET("/orders/:order_no", publicHandler.GetOrderByOrderNo)
 			user.GET("/orders/:order_no/fulfillment/download", publicHandler.DownloadFulfillment)
 			user.POST("/orders/:order_no/cancel", publicHandler.CancelOrder)
@@ -154,6 +170,7 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 			user.POST("/wallet/payment-channels", publicHandler.GetMyWalletPaymentChannels)
 			user.POST("/wallet/recharge", publicHandler.RechargeWallet)
 			user.GET("/wallet/recharges", publicHandler.ListMyWalletRecharges)
+			user.GET("/wallet/recharges/stats", publicHandler.MyWalletRechargeStats)
 			user.GET("/wallet/recharges/:recharge_no", publicHandler.GetMyWalletRecharge)
 			user.POST("/wallet/recharge/payments/:id/capture", publicHandler.CaptureMyWalletRechargePayment)
 			user.POST("/gift-cards/redeem", publicHandler.RedeemGiftCard)
@@ -162,6 +179,21 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 			user.GET("/affiliate/commissions", publicHandler.ListAffiliateCommissions)
 			user.GET("/affiliate/withdraws", publicHandler.ListAffiliateWithdraws)
 			user.POST("/affiliate/withdraws", publicHandler.ApplyAffiliateWithdraw)
+			user.GET("/reseller/profile", publicHandler.GetResellerManagementSnapshot)
+			user.POST("/reseller/apply", publicHandler.ApplyResellerProfile)
+			user.GET("/reseller/domains", publicHandler.ListResellerDomains)
+			user.POST("/reseller/domains", publicHandler.SubmitResellerCustomDomain)
+			user.GET("/reseller/site-config", publicHandler.GetResellerSiteConfig)
+			user.PUT("/reseller/site-config", publicHandler.UpdateResellerSiteConfig)
+			user.GET("/reseller/product-settings", publicHandler.ListResellerProductSettings)
+			user.GET("/reseller/product-settings/:product_id", publicHandler.GetResellerProductSetting)
+			user.PUT("/reseller/product-settings/:product_id", publicHandler.UpdateResellerProductSettings)
+			user.DELETE("/reseller/product-settings/:product_id", publicHandler.ResetResellerProductSetting)
+			user.GET("/reseller/dashboard", publicHandler.GetResellerDashboard)
+			user.GET("/reseller/balance-accounts", publicHandler.ListResellerBalanceAccounts)
+			user.GET("/reseller/ledger-entries", publicHandler.ListResellerLedgerEntries)
+			user.GET("/reseller/withdraws", publicHandler.ListResellerWithdraws)
+			user.POST("/reseller/withdraws", publicHandler.ApplyResellerWithdraw)
 
 			// API 对接权限（用户中心）
 			user.GET("/api-credential", publicHandler.GetMyApiCredential)
@@ -232,6 +264,7 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 
 		apiV1.POST("/payments/callback", publicHandler.PaymentCallback)
 		apiV1.GET("/payments/callback", publicHandler.PaymentCallback)
+		apiV1.POST("/payments/webhook/dujiaopay", publicHandler.DujiaoPayWebhook)
 		apiV1.POST("/payments/webhook/paypal", publicHandler.PaypalWebhook)
 		apiV1.POST("/payments/webhook/stripe", publicHandler.StripeWebhook)
 
@@ -244,7 +277,14 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 
 			// 需要鉴权的接口
 			authorized := admin.Use(JWTAuthMiddleware(cfg.JWT.SecretKey, c.AdminRepo), AdminRBACMiddleware(c.AuthzService))
+			// 支付/财务相关受保护子组：未确认合规声明时拦截
+			// 注：admin.Use(...) 已 mutate admin 自身，新 Group 继承 JWT + RBAC 中间件
+			paymentProtected := admin.Group("", PaymentComplianceRequired(c.ComplianceService))
 			{
+				// 合规声明
+				authorized.GET("/compliance/status", adminHandler.GetComplianceStatus)
+				authorized.POST("/compliance/acknowledge", adminHandler.AcknowledgeCompliance)
+
 				// 仪表盘
 				authorized.GET("/dashboard/overview", adminHandler.GetDashboardOverview)
 				authorized.GET("/dashboard/trends", adminHandler.GetDashboardTrends)
@@ -260,6 +300,7 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 				authorized.GET("/products/:id", adminHandler.GetAdminProduct)
 				authorized.POST("/products", adminHandler.CreateProduct)
 				authorized.PUT("/products/:id", adminHandler.UpdateProduct)
+				authorized.PATCH("/products/:id/wholesale-prices", adminHandler.UpdateProductWholesalePrices)
 				authorized.PATCH("/products/:id", adminHandler.QuickUpdateProduct)
 				authorized.DELETE("/products/:id", adminHandler.DeleteProduct)
 				authorized.POST("/products/batch-status", adminHandler.BatchUpdateProductStatus)
@@ -284,6 +325,7 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 				authorized.GET("/categories", adminHandler.GetAdminCategories)
 				authorized.POST("/categories", adminHandler.CreateCategory)
 				authorized.PUT("/categories/:id", adminHandler.UpdateCategory)
+				authorized.PATCH("/categories/:id/active", adminHandler.PatchCategoryActive)
 				authorized.DELETE("/categories/:id", adminHandler.DeleteCategory)
 
 				// 设置管理
@@ -324,10 +366,33 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 				authorized.GET("/affiliates/users", adminHandler.ListAffiliateUsers)
 				authorized.PATCH("/affiliates/users/:id/status", adminHandler.UpdateAffiliateUserStatus)
 				authorized.PATCH("/affiliates/users/batch-status", adminHandler.BatchUpdateAffiliateUserStatus)
-				authorized.GET("/affiliates/commissions", adminHandler.ListAffiliateCommissions)
-				authorized.GET("/affiliates/withdraws", adminHandler.ListAffiliateWithdraws)
-				authorized.POST("/affiliates/withdraws/:id/reject", adminHandler.RejectAffiliateWithdraw)
-				authorized.POST("/affiliates/withdraws/:id/pay", adminHandler.PayAffiliateWithdraw)
+				paymentProtected.GET("/affiliates/commissions", adminHandler.ListAffiliateCommissions)
+				paymentProtected.GET("/affiliates/withdraws", adminHandler.ListAffiliateWithdraws)
+				paymentProtected.POST("/affiliates/withdraws/:id/reject", adminHandler.RejectAffiliateWithdraw)
+				paymentProtected.POST("/affiliates/withdraws/:id/pay", adminHandler.PayAffiliateWithdraw)
+				authorized.GET("/resellers/operations/overview", adminHandler.GetResellerOperationsOverview)
+				authorized.GET("/resellers/profiles", adminHandler.ListResellerProfiles)
+				authorized.POST("/resellers/profiles/:id/approve", adminHandler.ApproveResellerProfile)
+				authorized.POST("/resellers/profiles/:id/reject", adminHandler.RejectResellerProfile)
+				authorized.POST("/resellers/profiles/:id/disable", adminHandler.DisableResellerProfile)
+				authorized.POST("/resellers/profiles/:id/restore", adminHandler.RestoreResellerProfile)
+				authorized.GET("/resellers/domains", adminHandler.ListResellerDomains)
+				authorized.POST("/resellers/domains/:id/approve", adminHandler.ApproveResellerDomain)
+				authorized.POST("/resellers/domains/:id/disable", adminHandler.DisableResellerDomain)
+				authorized.GET("/resellers/site-configs", adminHandler.ListResellerSiteConfigs)
+				authorized.GET("/resellers/site-configs/:reseller_id", adminHandler.GetResellerSiteConfig)
+				authorized.PUT("/resellers/site-configs/:reseller_id", adminHandler.UpdateResellerSiteConfig)
+				authorized.POST("/resellers/site-configs/:reseller_id/reset", adminHandler.ResetResellerSiteConfig)
+				authorized.GET("/resellers/product-settings", adminHandler.ListResellerProductSettings)
+				authorized.GET("/resellers/product-settings/:reseller_id/:product_id", adminHandler.GetResellerProductSetting)
+				authorized.PUT("/resellers/product-settings/:reseller_id/:product_id", adminHandler.UpdateResellerProductSettings)
+				authorized.DELETE("/resellers/product-settings/:reseller_id/:product_id", adminHandler.ResetResellerProductSetting)
+				paymentProtected.GET("/resellers/operations/finance", adminHandler.GetResellerOperationsFinance)
+				paymentProtected.GET("/resellers/ledger-entries", adminHandler.ListResellerLedgerEntries)
+				paymentProtected.GET("/resellers/balance-accounts", adminHandler.ListResellerBalanceAccounts)
+				paymentProtected.GET("/resellers/withdraws", adminHandler.ListResellerWithdraws)
+				paymentProtected.POST("/resellers/withdraws/:id/reject", adminHandler.RejectResellerWithdraw)
+				paymentProtected.POST("/resellers/withdraws/:id/pay", adminHandler.PayResellerWithdraw)
 
 				// 权限管理
 				authorized.GET("/authz/me", adminHandler.GetAuthzMe)
@@ -354,6 +419,7 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 
 				// 素材管理
 				authorized.GET("/media", adminHandler.GetAdminMedia)
+				authorized.POST("/media/batch-delete", adminHandler.BatchDeleteMedia)
 				authorized.PUT("/media/:id", adminHandler.UpdateMedia)
 				authorized.DELETE("/media/:id", adminHandler.DeleteMedia)
 
@@ -374,6 +440,7 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 				authorized.PATCH("/card-secrets/batch-status", adminHandler.BatchUpdateCardSecretStatus)
 				authorized.POST("/card-secrets/batch-delete", adminHandler.BatchDeleteCardSecrets)
 				authorized.POST("/card-secrets/export", adminHandler.ExportCardSecrets)
+				authorized.POST("/card-secrets/export-available", adminHandler.ExportAvailableCardSecrets)
 				authorized.GET("/card-secrets/stats", adminHandler.GetCardSecretStats)
 				authorized.GET("/card-secrets/batches", adminHandler.GetCardSecretBatches)
 				authorized.GET("/card-secrets/template", adminHandler.GetCardSecretTemplate)
@@ -405,28 +472,29 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 				authorized.POST("/member-levels/backfill", adminHandler.BackfillMemberLevels)
 
 				// 支付渠道与支付记录
-				authorized.POST("/payment-channels", adminHandler.CreatePaymentChannel)
-				authorized.GET("/payment-channels", adminHandler.GetPaymentChannels)
-				authorized.GET("/payment-channels/:id", adminHandler.GetPaymentChannel)
-				authorized.PUT("/payment-channels/:id", adminHandler.UpdatePaymentChannel)
-				authorized.DELETE("/payment-channels/:id", adminHandler.DeletePaymentChannel)
-				authorized.GET("/payments", adminHandler.GetAdminPayments)
-				authorized.GET("/payments/export", adminHandler.ExportAdminPayments)
-				authorized.GET("/payments/:id", adminHandler.GetAdminPayment)
+				paymentProtected.POST("/payment-channels", adminHandler.CreatePaymentChannel)
+				paymentProtected.GET("/payment-channels", adminHandler.GetPaymentChannels)
+				paymentProtected.GET("/payment-channels/:id", adminHandler.GetPaymentChannel)
+				paymentProtected.PUT("/payment-channels/:id", adminHandler.UpdatePaymentChannel)
+				paymentProtected.DELETE("/payment-channels/:id", adminHandler.DeletePaymentChannel)
+				paymentProtected.GET("/payments", adminHandler.GetAdminPayments)
+				paymentProtected.GET("/payments/export", adminHandler.ExportAdminPayments)
+				paymentProtected.GET("/payments/:id", adminHandler.GetAdminPayment)
 
 				// 用户管理
 				authorized.GET("/users", adminHandler.GetAdminUsers)
 				authorized.GET("/user-login-logs", adminHandler.GetUserLoginLogs)
 				authorized.PUT("/users/batch-status", adminHandler.BatchUpdateUserStatus)
+				authorized.DELETE("/users/:id/oauth/telegram", adminHandler.UnbindAdminUserTelegram)
 				authorized.GET("/users/:id", adminHandler.GetAdminUser)
 				authorized.PUT("/users/:id", adminHandler.UpdateAdminUser)
 				authorized.GET("/users/:id/coupon-usages", adminHandler.GetAdminUserCouponUsages)
-				authorized.GET("/users/:id/wallet", adminHandler.GetAdminUserWallet)
-				authorized.GET("/users/:id/wallet/transactions", adminHandler.GetAdminUserWalletTransactions)
-				authorized.POST("/users/:id/wallet/adjust", adminHandler.AdjustAdminUserWallet)
+				paymentProtected.GET("/users/:id/wallet", adminHandler.GetAdminUserWallet)
+				paymentProtected.GET("/users/:id/wallet/transactions", adminHandler.GetAdminUserWalletTransactions)
+				paymentProtected.POST("/users/:id/wallet/adjust", adminHandler.AdjustAdminUserWallet)
 				authorized.PUT("/users/:id/member-level", adminHandler.SetUserMemberLevel)
 				authorized.DELETE("/users/:id/2fa", adminHandler.ResetUser2FA)
-				authorized.GET("/wallet/recharges", adminHandler.GetAdminWalletRecharges)
+				paymentProtected.GET("/wallet/recharges", adminHandler.GetAdminWalletRecharges)
 
 				// API 凭证审核管理
 				authorized.GET("/api-credentials", adminHandler.GetApiCredentials)
@@ -470,10 +538,10 @@ func SetupRouter(cfg *config.Config, c *provider.Container) *gin.Engine {
 				authorized.POST("/procurement-orders/:id/cancel", adminHandler.CancelProcurementOrder)
 
 				// 对账管理
-				authorized.POST("/reconciliation/run", adminHandler.RunReconciliation)
-				authorized.GET("/reconciliation/jobs", adminHandler.GetReconciliationJobs)
-				authorized.GET("/reconciliation/jobs/:id", adminHandler.GetReconciliationJob)
-				authorized.PUT("/reconciliation/items/:id/resolve", adminHandler.ResolveReconciliationItem)
+				paymentProtected.POST("/reconciliation/run", adminHandler.RunReconciliation)
+				paymentProtected.GET("/reconciliation/jobs", adminHandler.GetReconciliationJobs)
+				paymentProtected.GET("/reconciliation/jobs/:id", adminHandler.GetReconciliationJob)
+				paymentProtected.PUT("/reconciliation/items/:id/resolve", adminHandler.ResolveReconciliationItem)
 
 				// 渠道客户端管理
 				authorized.GET("/channel-clients", adminHandler.ListChannelClients)

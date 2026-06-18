@@ -64,6 +64,47 @@ func migrationDone(value JSON) bool {
 	return ok && flag
 }
 
+// ensureOrderItemOriginalPriceMigration 为历史订单项回填原价快照。
+// 历史数据没有真实原价，只能以当时已记录的 unit_price/total_price 作为兼容回填。
+func ensureOrderItemOriginalPriceMigration() error {
+	if DB == nil {
+		return errors.New("database is not initialized")
+	}
+
+	var marker Setting
+	if err := DB.First(&marker, "key = ?", orderItemOriginalPriceMigrationKey).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+	} else if migrationDone(marker.ValueJSON) {
+		return nil
+	}
+
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&OrderItem{}).
+			Where("original_unit_price = 0").
+			Update("original_unit_price", gorm.Expr("unit_price")).
+			Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&OrderItem{}).
+			Where("original_total_price = 0").
+			Update("original_total_price", gorm.Expr("total_price")).
+			Error; err != nil {
+			return err
+		}
+
+		marker := Setting{
+			Key: orderItemOriginalPriceMigrationKey,
+			ValueJSON: JSON{
+				"done":        true,
+				"migrated_at": time.Now().UTC().Format(time.RFC3339),
+			},
+		}
+		return tx.Save(&marker).Error
+	})
+}
+
 // migrateCartSKUUniqueIndex 迁移购物车唯一索引为 user_id + product_id + sku_id 维度。
 func migrateCartSKUUniqueIndex() error {
 	migrator := DB.Migrator()
@@ -321,6 +362,43 @@ SELECT COUNT(1) FROM (
 	}
 
 	return nil
+}
+
+// ensurePaymentProviderBepusdtRenameMigration 把 payment_channels 表里历史
+// provider_type='epusdt'（实际是 BEpusdt 适配器）改名为 'bepusdt'，仅执行一次。
+// 通过 settings 表写 marker 保证幂等：一旦标记 done，后续启动跳过；
+// 即使用户后续新建真 epusdt 渠道也不会被误改。
+func ensurePaymentProviderBepusdtRenameMigration() error {
+	if DB == nil {
+		return errors.New("database is not initialized")
+	}
+
+	var marker Setting
+	if err := DB.First(&marker, "key = ?", paymentProviderBepusdtRenameMigrationSettingKey).Error; err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+	} else if migrationDone(marker.ValueJSON) {
+		return nil
+	}
+
+	return DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(
+			"UPDATE payment_channels SET provider_type = ? WHERE provider_type = ?",
+			"bepusdt", "epusdt",
+		).Error; err != nil {
+			return err
+		}
+
+		marker := Setting{
+			Key: paymentProviderBepusdtRenameMigrationSettingKey,
+			ValueJSON: JSON{
+				"done":        true,
+				"migrated_at": time.Now().UTC().Format(time.RFC3339),
+			},
+		}
+		return tx.Save(&marker).Error
+	})
 }
 
 // ensureCategoryParentMigration 兼容历史单层分类数据，统一将空 parent_id 视为 0。

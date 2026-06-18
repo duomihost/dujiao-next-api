@@ -49,16 +49,19 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 
 	if req.Key == constants.SettingKeySiteConfig {
-		_ = cache.Del(c.Request.Context(), publicConfigCacheKey)
+		_ = cache.DelAllPublicConfig(c.Request.Context())
 	}
 	if req.Key == constants.SettingKeyRegistrationConfig {
-		_ = cache.Del(c.Request.Context(), publicConfigCacheKey)
+		_ = cache.DelAllPublicConfig(c.Request.Context())
 	}
 	if req.Key == constants.SettingKeyNavConfig {
-		_ = cache.Del(c.Request.Context(), publicConfigCacheKey)
+		_ = cache.DelAllPublicConfig(c.Request.Context())
+	}
+	if req.Key == constants.SettingKeyHomeAnnouncement {
+		_ = cache.DelAllPublicConfig(c.Request.Context())
 	}
 	if req.Key == constants.SettingKeyWalletConfig {
-		_ = cache.Del(c.Request.Context(), publicConfigCacheKey)
+		_ = cache.DelAllPublicConfig(c.Request.Context())
 	}
 	if req.Key == constants.SettingKeyCallbackRoutesConfig {
 		h.SettingService.InvalidateCallbackRoutesCache()

@@ -27,6 +27,7 @@ type adminPaymentFixture struct {
 	User1ID              uint
 	User2ID              uint
 	OrderPaymentID       uint
+	OrderNo              string
 	RechargePaymentUser1 uint
 	RechargePaymentUser2 uint
 	RechargeNoUser1      string
@@ -54,6 +55,7 @@ func setupAdminPaymentHandlerTest(t *testing.T) (*Handler, *gorm.DB) {
 
 	paymentRepo := repository.NewPaymentRepository(db)
 	paymentChannelRepo := repository.NewPaymentChannelRepository(db)
+	orderRepo := repository.NewOrderRepository(db)
 	walletRepo := repository.NewWalletRepository(db)
 	paymentService := service.NewPaymentService(service.PaymentServiceOptions{
 		PaymentRepo:   paymentRepo,
@@ -65,6 +67,7 @@ func setupAdminPaymentHandlerTest(t *testing.T) (*Handler, *gorm.DB) {
 	h := &Handler{Container: &provider.Container{
 		PaymentService:     paymentService,
 		PaymentChannelRepo: paymentChannelRepo,
+		OrderRepo:          orderRepo,
 		WalletRepo:         walletRepo,
 	}}
 	return h, db
@@ -246,6 +249,7 @@ func seedAdminPaymentData(t *testing.T, db *gorm.DB) adminPaymentFixture {
 		User1ID:              user1.ID,
 		User2ID:              user2.ID,
 		OrderPaymentID:       orderPayment.ID,
+		OrderNo:              order.OrderNo,
 		RechargePaymentUser1: rechargePaymentUser1.ID,
 		RechargePaymentUser2: rechargePaymentUser2.ID,
 		RechargeNoUser1:      rechargeNoUser1,
@@ -303,7 +307,11 @@ func TestGetAdminPaymentsFiltersByUserID(t *testing.T) {
 		if !ok {
 			t.Fatalf("row id missing or invalid: %+v", row)
 		}
-		gotIDs[uint(idRaw)] = struct{}{}
+		id := uint(idRaw)
+		gotIDs[id] = struct{}{}
+		if id == fixture.OrderPaymentID && row["order_no"] != fixture.OrderNo {
+			t.Fatalf("order payment order_no want %q got %+v", fixture.OrderNo, row["order_no"])
+		}
 	}
 	if _, ok := gotIDs[fixture.OrderPaymentID]; !ok {
 		t.Fatalf("missing order payment id %d", fixture.OrderPaymentID)

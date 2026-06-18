@@ -4,6 +4,7 @@ import (
 	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/http/response"
 	"github.com/dujiao-next/internal/logger"
+	"github.com/dujiao-next/internal/service"
 
 	"github.com/gin-gonic/gin"
 )
@@ -22,6 +23,10 @@ func (h *Handler) UploadFile(c *gin.Context) {
 	// 保存文件并获取元数据
 	result, err := h.UploadService.SaveFileWithMeta(file, scene)
 	if err != nil {
+		if service.IsUploadValidationError(err) {
+			shared.RespondErrorWithMsg(c, response.CodeBadRequest, err.Error(), nil)
+			return
+		}
 		shared.RespondError(c, response.CodeInternal, "error.upload_failed", err)
 		return
 	}

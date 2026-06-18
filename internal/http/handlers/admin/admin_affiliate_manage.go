@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -31,9 +30,7 @@ func (h *Handler) ListAffiliateUsers(c *gin.Context) {
 		shared.RespondError(c, response.CodeInternal, "error.user_fetch_failed", nil)
 		return
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 	userID, _ := shared.ParseQueryUint(c.Query("user_id"), false)
 
 	rows, total, err := h.AffiliateService.ListAdminUsers(repository.AffiliateProfileListFilter{
@@ -57,9 +54,7 @@ func (h *Handler) ListAffiliateCommissions(c *gin.Context) {
 		shared.RespondError(c, response.CodeInternal, "error.user_fetch_failed", nil)
 		return
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 	profileID, _ := shared.ParseQueryUint(c.Query("affiliate_profile_id"), false)
 
 	rows, total, err := h.AffiliateService.ListAdminCommissions(service.AffiliateAdminCommissionListFilter{
@@ -83,9 +78,7 @@ func (h *Handler) ListAffiliateWithdraws(c *gin.Context) {
 		shared.RespondError(c, response.CodeInternal, "error.user_fetch_failed", nil)
 		return
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 	profileID, _ := shared.ParseQueryUint(c.Query("affiliate_profile_id"), false)
 
 	rows, total, err := h.AffiliateService.ListAdminWithdraws(service.AffiliateAdminWithdrawListFilter{

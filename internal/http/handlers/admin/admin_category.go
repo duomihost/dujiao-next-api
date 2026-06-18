@@ -100,6 +100,34 @@ func (h *Handler) UpdateCategory(c *gin.Context) {
 	response.Success(c, category)
 }
 
+// PatchCategoryActiveRequest 切换启用状态请求
+type PatchCategoryActiveRequest struct {
+	IsActive bool `json:"is_active"`
+}
+
+// PatchCategoryActive 切换分类启用状态
+func (h *Handler) PatchCategoryActive(c *gin.Context) {
+	id := c.Param("id")
+
+	var req PatchCategoryActiveRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		shared.RespondBindError(c, err)
+		return
+	}
+
+	category, err := h.CategoryService.SetActive(id, req.IsActive)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			shared.RespondError(c, response.CodeNotFound, "error.category_not_found", nil)
+			return
+		}
+		shared.RespondError(c, response.CodeInternal, "error.category_update_failed", err)
+		return
+	}
+
+	response.Success(c, category)
+}
+
 // DeleteCategory 删除分类（软删除）
 func (h *Handler) DeleteCategory(c *gin.Context) {
 	id := c.Param("id")

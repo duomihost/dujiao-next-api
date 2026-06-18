@@ -241,6 +241,9 @@ func (s *SiteConnectionService) Ping(id uint) (*upstream.PingResult, error) {
 		ApiSecret: decrypted,
 		Protocol:  conn.Protocol,
 	}, s.uploadsDir)
+	if err != nil {
+		return nil, err
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

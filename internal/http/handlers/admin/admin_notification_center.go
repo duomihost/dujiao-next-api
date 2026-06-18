@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
@@ -55,33 +54,19 @@ type NotificationCenterTestSendRequest struct {
 
 // ListNotificationLogs 获取通知发送日志列表
 func (h *Handler) ListNotificationLogs(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	channel := strings.ToLower(strings.TrimSpace(c.Query("channel")))
 	status := strings.ToLower(strings.TrimSpace(c.Query("status")))
 	eventType := strings.ToLower(strings.TrimSpace(c.Query("event_type")))
-	isTestRaw := strings.TrimSpace(c.Query("is_test"))
-	createdFromRaw := strings.TrimSpace(c.Query("created_from"))
-	createdToRaw := strings.TrimSpace(c.Query("created_to"))
 
-	var isTest *bool
-	if isTestRaw != "" {
-		parsed, err := strconv.ParseBool(isTestRaw)
-		if err != nil {
-			shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-			return
-		}
-		isTest = &parsed
-	}
-
-	createdFrom, err := shared.ParseTimeNullable(createdFromRaw)
+	isTest, err := shared.ParseQueryBoolPtr(c, "is_test")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
 	}
-	createdTo, err := shared.ParseTimeNullable(createdToRaw)
+
+	createdFrom, createdTo, err := shared.ParseQueryTimeRange(c, "created_from", "created_to")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return

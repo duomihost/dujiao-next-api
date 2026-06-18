@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/dujiao-next/internal/admincmd"
 	"github.com/dujiao-next/internal/app"
 	"github.com/dujiao-next/internal/config"
 	"github.com/dujiao-next/internal/logger"
@@ -28,6 +29,14 @@ const (
 )
 
 func main() {
+	// admin 子命令短路：./dujiao-api admin <subcommand>
+	// 在 banner / web 提示 / migrate / default admin / app.Run 之前处理，
+	// 避免运维操作时打印一堆无关日志。
+	if len(os.Args) >= 2 && os.Args[1] == "admin" {
+		runAdminSubcommand(os.Args[2:])
+		return
+	}
+
 	printStartupBanner()
 
 	// 加载配置
@@ -134,6 +143,22 @@ func isWeakSecret(secret string) bool {
 		return true
 	}
 	return false
+}
+
+// runAdminSubcommand 处理 ./dujiao-api admin <subcommand>，仅初始化 DB
+// 后委托给 internal/admincmd 包，不启动 HTTP / worker / web 等服务。
+func runAdminSubcommand(args []string) {
+	cfg := config.Load()
+	if err := models.InitDB(cfg.Database.Driver, cfg.Database.DSN, models.DBPoolConfig{
+		MaxOpenConns:           cfg.Database.Pool.MaxOpenConns,
+		MaxIdleConns:           cfg.Database.Pool.MaxIdleConns,
+		ConnMaxLifetimeSeconds: cfg.Database.Pool.ConnMaxLifetimeSeconds,
+		ConnMaxIdleTimeSeconds: cfg.Database.Pool.ConnMaxIdleTimeSeconds,
+	}); err != nil {
+		fmt.Fprintf(os.Stderr, "init db: %v\n", err)
+		os.Exit(1)
+	}
+	admincmd.Run(args)
 }
 
 // resolveDefaultAdminCredentials 解析默认管理员初始化凭据（环境变量优先，其次 config.yml）

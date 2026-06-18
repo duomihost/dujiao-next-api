@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
@@ -40,9 +39,7 @@ func (h *Handler) GetReconciliationJobs(c *gin.Context) {
 		shared.RespondErrorWithMsg(c, response.CodeInternal, "service not available", nil)
 		return
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	filter := repository.ReconciliationJobListFilter{
 		Pagination: repository.Pagination{Page: page, PageSize: pageSize},
@@ -87,9 +84,7 @@ func (h *Handler) GetReconciliationJob(c *gin.Context) {
 	}
 
 	// 获取明细项
-	itemPage, _ := strconv.Atoi(c.DefaultQuery("items_page", "1"))
-	itemPageSize, _ := strconv.Atoi(c.DefaultQuery("items_page_size", "20"))
-	itemPage, itemPageSize = shared.NormalizePagination(itemPage, itemPageSize)
+	itemPage, itemPageSize := shared.ParsePaginationWithKeys(c, "items_page", "items_page_size", 20)
 
 	items, itemsTotal, err := h.ReconciliationService.GetJobItems(id, itemPage, itemPageSize)
 	if err != nil {

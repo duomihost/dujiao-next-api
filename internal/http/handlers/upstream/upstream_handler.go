@@ -7,11 +7,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/dujiao-next/internal/constants"
+	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/logger"
 	"github.com/dujiao-next/internal/models"
 	"github.com/dujiao-next/internal/provider"
@@ -177,24 +177,25 @@ func (h *Handler) ListCategories(c *gin.Context) {
 
 // upstreamProduct 上游商品响应格式
 type upstreamProduct struct {
-	ID               uint               `json:"id"`
-	Slug             string             `json:"slug"`
-	SeoMeta          models.JSON        `json:"seo_meta"`
-	Title            models.JSON        `json:"title"`
-	Description      models.JSON        `json:"description"`
-	Content          models.JSON        `json:"content"`
-	Images           models.StringArray `json:"images"`
-	Tags             models.StringArray `json:"tags"`
-	PriceAmount      string             `json:"price_amount"`
-	OriginalPrice    string             `json:"original_price,omitempty"`
-	MemberPrice      string             `json:"member_price,omitempty"`
-	FulfillmentType  string             `json:"fulfillment_type"`
-	ManualFormSchema models.JSON        `json:"manual_form_schema"`
-	IsActive         bool               `json:"is_active"`
-	CategoryID       uint               `json:"category_id"`
-	SKUs             []upstreamSKU      `json:"skus"`
-	CreatedAt        time.Time          `json:"created_at"`
-	UpdatedAt        time.Time          `json:"updated_at"`
+	ID               uint                       `json:"id"`
+	Slug             string                     `json:"slug"`
+	SeoMeta          models.JSON                `json:"seo_meta"`
+	Title            models.JSON                `json:"title"`
+	Description      models.JSON                `json:"description"`
+	Content          models.JSON                `json:"content"`
+	Images           models.StringArray         `json:"images"`
+	Tags             models.StringArray         `json:"tags"`
+	PriceAmount      string                     `json:"price_amount"`
+	OriginalPrice    string                     `json:"original_price,omitempty"`
+	MemberPrice      string                     `json:"member_price,omitempty"`
+	WholesalePrices  models.WholesalePriceTiers `json:"wholesale_prices,omitempty"`
+	FulfillmentType  string                     `json:"fulfillment_type"`
+	ManualFormSchema models.JSON                `json:"manual_form_schema"`
+	IsActive         bool                       `json:"is_active"`
+	CategoryID       uint                       `json:"category_id"`
+	SKUs             []upstreamSKU              `json:"skus"`
+	CreatedAt        time.Time                  `json:"created_at"`
+	UpdatedAt        time.Time                  `json:"updated_at"`
 }
 
 type upstreamSKU struct {
@@ -211,14 +212,7 @@ type upstreamSKU struct {
 
 // ListProducts GET /api/v1/upstream/products
 func (h *Handler) ListProducts(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 || pageSize > 50 {
-		pageSize = 50
-	}
+	page, pageSize := shared.ParsePaginationWithBounds(c, "page", "page_size", 50, 50)
 
 	// 是否包含下架商品：下游同步任务用此参数识别上游下架/删除状态
 	includeInactive := c.Query("include_inactive") == "true"
@@ -510,13 +504,13 @@ func (h *Handler) GetOrder(c *gin.Context) {
 		return
 	}
 
-	orderID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	orderID, err := shared.ParseParamUint(c, "id")
 	if err != nil {
 		errorResponse(c, http.StatusBadRequest, "bad_request", "invalid order id")
 		return
 	}
 
-	order, err := h.OrderService.GetOrderByUser(uint(orderID), userID)
+	order, err := h.OrderService.GetOrderByUser(orderID, userID)
 	if err != nil {
 		if errors.Is(err, service.ErrOrderNotFound) {
 			errorResponse(c, http.StatusNotFound, "order_not_found", "order not found")
@@ -584,13 +578,15 @@ func (h *Handler) GetOrder(c *gin.Context) {
 		items := make([]gin.H, 0, len(order.Items))
 		for _, item := range order.Items {
 			items = append(items, gin.H{
-				"product_id":       item.ProductID,
-				"sku_id":           item.SKUID,
-				"title":            item.TitleJSON,
-				"quantity":         item.Quantity,
-				"unit_price":       item.UnitPrice.StringFixed(2),
-				"total_price":      item.TotalPrice.StringFixed(2),
-				"fulfillment_type": item.FulfillmentType,
+				"product_id":           item.ProductID,
+				"sku_id":               item.SKUID,
+				"title":                item.TitleJSON,
+				"quantity":             item.Quantity,
+				"original_unit_price":  item.OriginalUnitPrice.StringFixed(2),
+				"unit_price":           item.UnitPrice.StringFixed(2),
+				"original_total_price": item.OriginalTotalPrice.StringFixed(2),
+				"total_price":          item.TotalPrice.StringFixed(2),
+				"fulfillment_type":     item.FulfillmentType,
 			})
 		}
 		resp["items"] = items
@@ -609,13 +605,13 @@ func (h *Handler) CancelOrder(c *gin.Context) {
 		return
 	}
 
-	orderID, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	orderID, err := shared.ParseParamUint(c, "id")
 	if err != nil {
 		errorResponse(c, http.StatusBadRequest, "bad_request", "invalid order id")
 		return
 	}
 
-	order, err := h.OrderService.CancelOrder(uint(orderID), userID)
+	order, err := h.OrderService.CancelOrder(orderID, userID)
 	if err != nil {
 		if errors.Is(err, service.ErrOrderNotFound) {
 			errorResponse(c, http.StatusNotFound, "order_not_found", "order not found")
@@ -891,6 +887,7 @@ func (h *Handler) toUpstreamProductWithMemberPrice(p models.Product, memberLevel
 		Images:           p.Images,
 		Tags:             p.Tags,
 		PriceAmount:      p.PriceAmount.StringFixed(2),
+		WholesalePrices:  p.WholesalePrices,
 		FulfillmentType:  effectiveFulfillmentType,
 		ManualFormSchema: p.ManualFormSchemaJSON,
 		IsActive:         p.IsActive,

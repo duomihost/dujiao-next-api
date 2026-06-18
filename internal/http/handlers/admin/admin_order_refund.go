@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
@@ -29,9 +28,7 @@ type AdminManualRefundOrderRequest struct {
 
 // GetAdminOrderRefunds 获取管理端退款记录列表
 func (h *Handler) GetAdminOrderRefunds(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	items, total, err := h.OrderRefundService.ListAdminRefundItems(service.AdminOrderRefundListQuery{
 		Page:           page,

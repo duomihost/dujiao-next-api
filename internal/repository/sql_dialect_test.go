@@ -21,6 +21,15 @@ func TestJSONTextExprByDialectPostgres(t *testing.T) {
 	}
 }
 
+func TestJSONArrayLengthExprByDialect(t *testing.T) {
+	if got, want := jsonArrayLengthExprByDialect("sqlite", "wholesale_prices"), "json_array_length(COALESCE(wholesale_prices, '[]'))"; got != want {
+		t.Fatalf("sqlite json array length expr mismatch, want %s got %s", want, got)
+	}
+	if got, want := jsonArrayLengthExprByDialect("postgres", "wholesale_prices"), "jsonb_array_length(COALESCE(wholesale_prices::jsonb, '[]'::jsonb))"; got != want {
+		t.Fatalf("postgres json array length expr mismatch, want %s got %s", want, got)
+	}
+}
+
 func TestBuildLocalizedLikeCondition(t *testing.T) {
 	condition, argCount := buildLocalizedLikeCondition(nil, []string{"slug"}, []string{"title_json", "description_json"})
 	if argCount != 7 {

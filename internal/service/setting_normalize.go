@@ -24,6 +24,9 @@ const (
 	settingNavCustomItemsMaxCount        = 10
 	settingNavCustomItemTitleMaxRuneSize = 120
 	settingNavCustomItemURLMaxRuneSize   = 2000
+
+	settingRegistrationEmailDomainMaxCount  = 100
+	settingRegistrationEmailDomainMaxLength = 253
 )
 
 // normalizeSettingValueByKey 按设置键执行归一化，避免非法值入库。
@@ -54,8 +57,13 @@ func normalizeSettingValueByKey(key string, value map[string]interface{}) models
 	case constants.SettingKeyOrderRiskControlConfig:
 		cfg := orderRiskControlConfigFromJSON(models.JSON(value), DefaultOrderRiskControlConfig())
 		return OrderRiskControlConfigToMap(cfg)
+	case constants.SettingKeyUpstreamSyncConfig:
+		cfg := upstreamSyncConfigFromJSON(models.JSON(value), DefaultUpstreamSyncConfig())
+		return UpstreamSyncConfigToMap(cfg)
 	case constants.SettingKeyCallbackRoutesConfig:
 		return normalizeCallbackRoutesSetting(value)
+	case constants.SettingKeyHomeAnnouncement:
+		return normalizeHomeAnnouncement(value)
 	default:
 		return models.JSON(value)
 	}
@@ -337,7 +345,6 @@ func normalizeSiteTemplateMode(raw interface{}) string {
 	return "card"
 }
 
-// normalizeRegistrationSetting 归一化注册配置。
 func normalizeNavConfig(value map[string]interface{}) models.JSON {
 	// builtin: blog / notice / about 开关，默认 true
 	builtin := map[string]interface{}{
@@ -432,8 +439,68 @@ func normalizeNavConfig(value map[string]interface{}) models.JSON {
 	}
 }
 
+func normalizeRegistrationEmailDomains(raw interface{}) []string {
+	var candidates []string
+	switch value := raw.(type) {
+	case string:
+		candidates = strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == '\n' || r == '\r' || r == '\t' || r == ' '
+		})
+	case []string:
+		candidates = append(candidates, value...)
+	case []interface{}:
+		for _, item := range value {
+			candidates = append(candidates, normalizeSettingText(item))
+		}
+	default:
+		return []string{}
+	}
+
+	seen := make(map[string]struct{}, len(candidates))
+	result := make([]string, 0, len(candidates))
+	for _, candidate := range candidates {
+		domain := strings.ToLower(strings.TrimSpace(candidate))
+		domain = strings.TrimPrefix(domain, "@")
+		if len(domain) == 0 || len(domain) > settingRegistrationEmailDomainMaxLength {
+			continue
+		}
+		if !isValidRegistrationEmailDomain(domain) {
+			continue
+		}
+		if _, exists := seen[domain]; exists {
+			continue
+		}
+		seen[domain] = struct{}{}
+		result = append(result, domain)
+		if len(result) >= settingRegistrationEmailDomainMaxCount {
+			break
+		}
+	}
+	return result
+}
+
+func isValidRegistrationEmailDomain(domain string) bool {
+	if strings.Contains(domain, "..") || !strings.Contains(domain, ".") {
+		return false
+	}
+	labels := strings.Split(domain, ".")
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, r := range label {
+			if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+				continue
+			}
+			return false
+		}
+	}
+	return true
+}
+
+// normalizeRegistrationSetting 归一化注册配置。
 func normalizeRegistrationSetting(value map[string]interface{}) models.JSON {
-	normalized := make(models.JSON, 2)
+	normalized := make(models.JSON, 4)
 	registrationEnabled := true
 	if raw, ok := value[constants.SettingFieldRegistrationEnabled]; ok {
 		registrationEnabled = parseSettingBool(raw)
@@ -445,6 +512,13 @@ func normalizeRegistrationSetting(value map[string]interface{}) models.JSON {
 		emailVerificationEnabled = parseSettingBool(raw)
 	}
 	normalized[constants.SettingFieldEmailVerificationEnabled] = emailVerificationEnabled
+
+	emailDomainAllowlistEnabled := false
+	if raw, ok := value[constants.SettingFieldEmailDomainAllowlistEnabled]; ok {
+		emailDomainAllowlistEnabled = parseSettingBool(raw)
+	}
+	normalized[constants.SettingFieldEmailDomainAllowlistEnabled] = emailDomainAllowlistEnabled
+	normalized[constants.SettingFieldAllowedEmailDomains] = normalizeRegistrationEmailDomains(value[constants.SettingFieldAllowedEmailDomains])
 
 	return normalized
 }

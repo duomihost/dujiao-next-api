@@ -15,10 +15,12 @@ import (
 var DB *gorm.DB
 
 const (
-	manualStockRemainingMigrationSettingKey = "migration/manual_stock_remaining_v1"
-	skuMigrationSettingKey                  = "migration/product_sku_v1"
-	categoryParentMigrationSettingKey       = "migration/category_parent_v1"
-	manualStockUnlimitedValue               = -1
+	manualStockRemainingMigrationSettingKey         = "migration/manual_stock_remaining_v1"
+	skuMigrationSettingKey                          = "migration/product_sku_v1"
+	categoryParentMigrationSettingKey               = "migration/category_parent_v1"
+	paymentProviderBepusdtRenameMigrationSettingKey = "migration/payment_provider_bepusdt_rename_v1"
+	orderItemOriginalPriceMigrationKey              = "migration/order_item_original_price_v1"
+	manualStockUnlimitedValue                       = -1
 )
 
 // DBPoolConfig 数据库连接池配置
@@ -108,6 +110,15 @@ func AutoMigrate() error {
 		&AffiliateClick{},
 		&AffiliateCommission{},
 		&AffiliateWithdrawRequest{},
+		&ResellerProfile{},
+		&ResellerDomain{},
+		&ResellerSiteConfig{},
+		&ResellerProductSetting{},
+		&ResellerOrderSnapshot{},
+		&ResellerLedgerEntry{},
+		&ResellerWithdrawRequest{},
+		&ResellerBalanceAccount{},
+		&ResellerRelatedAccount{},
 		&WalletAccount{},
 		&WalletTransaction{},
 		&WalletRechargeOrder{},
@@ -165,6 +176,15 @@ func AutoMigrate() error {
 		return err
 	}
 	if err := ensureCategoryParentMigration(); err != nil {
+		return err
+	}
+	if err := ensurePaymentProviderBepusdtRenameMigration(); err != nil {
+		return err
+	}
+	if err := ensureOrderItemOriginalPriceMigration(); err != nil {
+		return err
+	}
+	if err := ensureResellerIndexes(DB); err != nil {
 		return err
 	}
 

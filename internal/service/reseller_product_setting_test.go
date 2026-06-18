@@ -1,0 +1,206 @@
+package service
+
+import (
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/dujiao-next/internal/constants"
+	"github.com/dujiao-next/internal/models"
+	"github.com/dujiao-next/internal/repository"
+	"github.com/glebarez/sqlite"
+	"github.com/shopspring/decimal"
+	"gorm.io/gorm"
+)
+
+func openResellerProductSettingServiceTestDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	dsn := fmt.Sprintf("file:reseller_product_setting_service_%d?mode=memory&cache=shared", time.Now().UnixNano())
+	db, err := gorm.Open(sqlite.Open(dsn), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite failed: %v", err)
+	}
+	if err := db.AutoMigrate(
+		&models.User{},
+		&models.Category{},
+		&models.Product{},
+		&models.ProductSKU{},
+		&models.ResellerProfile{},
+		&models.ResellerProductSetting{},
+	); err != nil {
+		t.Fatalf("migrate failed: %v", err)
+	}
+	return db
+}
+
+func seedResellerProductSettingServiceData(t *testing.T, db *gorm.DB) (models.User, models.ResellerProfile, models.Product, []models.ProductSKU) {
+	t.Helper()
+	user := models.User{Email: fmt.Sprintf("setting-service-%d@example.test", time.Now().UnixNano()), PasswordHash: "hash", Status: constants.UserStatusActive}
+	if err := db.Create(&user).Error; err != nil {
+		t.Fatalf("create user failed: %v", err)
+	}
+	profile := models.ResellerProfile{
+		UserID:               user.ID,
+		Status:               models.ResellerProfileStatusActive,
+		DefaultMarkupPercent: models.NewMoneyFromDecimal(decimal.RequireFromString("10.00")),
+		MaxMarkupPercent:     models.NewMoneyFromDecimal(decimal.RequireFromString("40.00")),
+		SettlementStatus:     models.ResellerSettlementStatusNormal,
+	}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatalf("create profile failed: %v", err)
+	}
+	category := models.Category{Slug: "service-category", NameJSON: models.JSON{"zh-CN": "分类"}, IsActive: true}
+	if err := db.Create(&category).Error; err != nil {
+		t.Fatalf("create category failed: %v", err)
+	}
+	product := models.Product{
+		CategoryID:      category.ID,
+		Slug:            "service-product",
+		TitleJSON:       models.JSON{"zh-CN": "服务商品", "zh-TW": "服務商品", "en-US": "Service Product"},
+		PriceAmount:     models.NewMoneyFromDecimal(decimal.RequireFromString("100.00")),
+		CostPriceAmount: models.NewMoneyFromDecimal(decimal.RequireFromString("80.00")),
+		IsActive:        true,
+	}
+	if err := db.Create(&product).Error; err != nil {
+		t.Fatalf("create product failed: %v", err)
+	}
+	skus := []models.ProductSKU{
+		{ProductID: product.ID, SKUCode: "A", PriceAmount: models.NewMoneyFromDecimal(decimal.RequireFromString("100.00")), CostPriceAmount: models.NewMoneyFromDecimal(decimal.RequireFromString("80.00")), IsActive: true},
+		{ProductID: product.ID, SKUCode: "B", PriceAmount: models.NewMoneyFromDecimal(decimal.RequireFromString("200.00")), CostPriceAmount: models.NewMoneyFromDecimal(decimal.RequireFromString("120.00")), IsActive: true},
+	}
+	if err := db.Create(&skus).Error; err != nil {
+		t.Fatalf("create skus failed: %v", err)
+	}
+	return user, profile, product, skus
+}
+
+func newResellerProductSettingServiceForTest(db *gorm.DB) *ResellerProductSettingService {
+	return NewResellerProductSettingService(
+		repository.NewResellerProductSettingRepository(db),
+		repository.NewResellerRepository(db),
+		repository.NewProductRepository(db),
+	)
+}
+
+func TestResellerProductSettingServiceUserSaveValidatesAndReturnsEffectivePrices(t *testing.T) {
+	db := openResellerProductSettingServiceTestDB(t)
+	user, _, product, skus := seedResellerProductSettingServiceData(t, db)
+	svc := newResellerProductSettingServiceForTest(db)
+
+	detail, err := svc.SaveUserProductSettings(user.ID, product.ID, ResellerProductSettingSaveInput{
+		Settings: []ResellerProductSettingInput{
+			{SKUID: 0, IsListed: true, PricingMode: models.ResellerPricingModeMarkupPercent, MarkupPercent: decimal.RequireFromString("20.00")},
+			{SKUID: skus[0].ID, IsListed: true, PricingMode: models.ResellerPricingModeFixedPrice, FixedPriceAmount: decimal.RequireFromString("130.00")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("save user settings failed: %v", err)
+	}
+	if detail == nil || detail.Product.ID != product.ID || len(detail.Settings) != 2 {
+		t.Fatalf("unexpected detail: %+v", detail)
+	}
+	effective := detail.EffectiveBySKUID[skus[0].ID]
+	if effective.StringFixed(2) != "130.00" {
+		t.Fatalf("sku override effective price want 130.00 got %s", effective.StringFixed(2))
+	}
+	fallback := detail.EffectiveBySKUID[skus[1].ID]
+	if fallback.StringFixed(2) != "240.00" {
+		t.Fatalf("product markup effective price want 240.00 got %s", fallback.StringFixed(2))
+	}
+}
+
+func TestResellerProductSettingServicePersistsFirstHiddenSKUSetting(t *testing.T) {
+	db := openResellerProductSettingServiceTestDB(t)
+	user, profile, product, skus := seedResellerProductSettingServiceData(t, db)
+	svc := newResellerProductSettingServiceForTest(db)
+
+	detail, err := svc.SaveUserProductSettings(user.ID, product.ID, ResellerProductSettingSaveInput{
+		Settings: []ResellerProductSettingInput{
+			{SKUID: skus[0].ID, IsListed: false, PricingMode: models.ResellerPricingModeInherit},
+		},
+	})
+	if err != nil {
+		t.Fatalf("save hidden sku setting failed: %v", err)
+	}
+	if detail == nil {
+		t.Fatal("expected detail after hidden save")
+	}
+
+	var row models.ResellerProductSetting
+	if err := db.Where("reseller_id = ? AND product_id = ? AND sku_id = ?", profile.ID, product.ID, skus[0].ID).
+		First(&row).Error; err != nil {
+		t.Fatalf("fetch hidden sku setting failed: %v", err)
+	}
+	if row.IsListed {
+		t.Fatalf("expected first hidden sku save to persist is_listed=false, got true: %+v", row)
+	}
+}
+
+func TestResellerProductSettingServiceRejectsPriceBelowBase(t *testing.T) {
+	db := openResellerProductSettingServiceTestDB(t)
+	user, _, product, skus := seedResellerProductSettingServiceData(t, db)
+	svc := newResellerProductSettingServiceForTest(db)
+
+	_, err := svc.SaveUserProductSettings(user.ID, product.ID, ResellerProductSettingSaveInput{
+		Settings: []ResellerProductSettingInput{
+			{SKUID: skus[0].ID, IsListed: true, PricingMode: models.ResellerPricingModeFixedPrice, FixedPriceAmount: decimal.RequireFromString("99.99")},
+		},
+	})
+	if err != ErrResellerPriceBelowBase {
+		t.Fatalf("expected ErrResellerPriceBelowBase, got %v", err)
+	}
+}
+
+func TestResellerProductSettingServiceRejectsMarkupExceeded(t *testing.T) {
+	db := openResellerProductSettingServiceTestDB(t)
+	user, _, product, skus := seedResellerProductSettingServiceData(t, db)
+	svc := newResellerProductSettingServiceForTest(db)
+
+	_, err := svc.SaveUserProductSettings(user.ID, product.ID, ResellerProductSettingSaveInput{
+		Settings: []ResellerProductSettingInput{
+			{SKUID: skus[0].ID, IsListed: true, PricingMode: models.ResellerPricingModeFixedPrice, FixedPriceAmount: decimal.RequireFromString("150.00")},
+		},
+	})
+	if err != ErrResellerMarkupExceeded {
+		t.Fatalf("expected ErrResellerMarkupExceeded, got %v", err)
+	}
+}
+
+func TestResellerProductSettingServiceRejectsBatchWithoutPartialWrites(t *testing.T) {
+	db := openResellerProductSettingServiceTestDB(t)
+	user, profile, product, skus := seedResellerProductSettingServiceData(t, db)
+	svc := newResellerProductSettingServiceForTest(db)
+
+	_, err := svc.SaveUserProductSettings(user.ID, product.ID, ResellerProductSettingSaveInput{
+		Settings: []ResellerProductSettingInput{
+			{SKUID: skus[0].ID, IsListed: true, PricingMode: models.ResellerPricingModeFixedPrice, FixedPriceAmount: decimal.RequireFromString("130.00")},
+			{SKUID: skus[1].ID, IsListed: true, PricingMode: models.ResellerPricingModeFixedPrice, FixedPriceAmount: decimal.RequireFromString("99.99")},
+		},
+	})
+	if err != ErrResellerPriceBelowBase {
+		t.Fatalf("expected ErrResellerPriceBelowBase, got %v", err)
+	}
+
+	var count int64
+	if err := db.Model(&models.ResellerProductSetting{}).
+		Where("reseller_id = ? AND product_id = ?", profile.ID, product.ID).
+		Count(&count).Error; err != nil {
+		t.Fatalf("count settings failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no partial writes after rejected batch, got %d settings", count)
+	}
+}
+
+func TestResellerProductSettingServiceRequiresActiveProfile(t *testing.T) {
+	db := openResellerProductSettingServiceTestDB(t)
+	user, profile, product, _ := seedResellerProductSettingServiceData(t, db)
+	if err := db.Model(&models.ResellerProfile{}).Where("id = ?", profile.ID).Update("status", models.ResellerProfileStatusPendingReview).Error; err != nil {
+		t.Fatalf("update profile failed: %v", err)
+	}
+	svc := newResellerProductSettingServiceForTest(db)
+	_, _, err := svc.ListUserProductSettings(user.ID, ResellerProductSettingUserListInput{Page: 1, PageSize: 20})
+	if err != ErrResellerProfileInactive {
+		t.Fatalf("expected inactive profile, got %v product=%d", err, product.ID)
+	}
+}

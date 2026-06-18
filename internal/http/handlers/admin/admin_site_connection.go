@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/http/response"
@@ -14,9 +13,7 @@ import (
 
 // GetSiteConnections 获取对接连接列表
 func (h *Handler) GetSiteConnections(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	conns, total, err := h.SiteConnectionService.List(repository.SiteConnectionListFilter{
 		Pagination: repository.Pagination{

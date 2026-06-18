@@ -44,7 +44,7 @@ func (h *Handler) UpdateTelegramAuthSettings(c *gin.Context) {
 	if h.TelegramAuthService != nil {
 		h.TelegramAuthService.SetConfig(h.Config.TelegramAuth)
 	}
-	_ = cache.Del(c.Request.Context(), publicConfigCacheKey)
+	_ = cache.DelAllPublicConfig(c.Request.Context())
 
 	response.Success(c, service.MaskTelegramAuthSettingForAdmin(setting))
 }

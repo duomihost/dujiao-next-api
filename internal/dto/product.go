@@ -2,29 +2,37 @@ package dto
 
 import (
 	"github.com/dujiao-next/internal/models"
+
+	"github.com/shopspring/decimal"
 )
 
 // ProductResp 商品公共响应
 type ProductResp struct {
-	ID                   uint               `json:"id"`
-	CategoryID           uint               `json:"category_id"`
-	Slug                 string             `json:"slug"`
-	SeoMeta              models.JSON        `json:"seo_meta"`
-	Title                models.JSON        `json:"title"`
-	Description          models.JSON        `json:"description"`
-	Content              models.JSON        `json:"content"`
-	PriceAmount          models.Money       `json:"price_amount"`
-	Images               models.StringArray `json:"images"`
-	Tags                 models.StringArray `json:"tags"`
-	PurchaseType         string             `json:"purchase_type"`
-	MinPurchaseQuantity  int                `json:"min_purchase_quantity"`
-	MaxPurchaseQuantity  int                `json:"max_purchase_quantity"`
-	FulfillmentType      string             `json:"fulfillment_type"`
-	ManualFormSchema     models.JSON        `json:"manual_form_schema"`
-	ManualStockAvailable int                `json:"manual_stock_available"`
-	AutoStockAvailable   int64              `json:"auto_stock_available"`
-	StockStatus          string             `json:"stock_status"`
-	IsSoldOut            bool               `json:"is_sold_out"`
+	ID                   uint                 `json:"id"`
+	CategoryID           uint                 `json:"category_id"`
+	Slug                 string               `json:"slug"`
+	SeoMeta              models.JSON          `json:"seo_meta"`
+	Title                models.JSON          `json:"title"`
+	Description          models.JSON          `json:"description"`
+	Content              models.JSON          `json:"content"`
+	PriceAmount          models.Money         `json:"price_amount"`
+	WholesalePrices      []WholesalePriceResp `json:"wholesale_prices,omitempty"`
+	Images               models.StringArray   `json:"images"`
+	Tags                 models.StringArray   `json:"tags"`
+	PurchaseType         string               `json:"purchase_type"`
+	MinPurchaseQuantity  int                  `json:"min_purchase_quantity"`
+	MaxPurchaseQuantity  int                  `json:"max_purchase_quantity"`
+	StockDisplayMode     string               `json:"stock_display_mode"`
+	StockDisplay         string               `json:"stock_display"`
+	StockRangeMin        *int                 `json:"stock_range_min,omitempty"`
+	StockRangeMax        *int                 `json:"stock_range_max,omitempty"`
+	StockQuantityHidden  bool                 `json:"stock_quantity_hidden"`
+	FulfillmentType      string               `json:"fulfillment_type"`
+	ManualFormSchema     models.JSON          `json:"manual_form_schema"`
+	ManualStockAvailable int                  `json:"manual_stock_available"`
+	AutoStockAvailable   int64                `json:"auto_stock_available"`
+	StockStatus          string               `json:"stock_status"`
+	IsSoldOut            bool                 `json:"is_sold_out"`
 
 	// 支付渠道限制
 	PaymentChannelIDs []uint `json:"payment_channel_ids,omitempty"`
@@ -45,17 +53,48 @@ type ProductResp struct {
 	RelatedPosts []RelatedPostCard `json:"related_posts,omitempty"`
 }
 
+// WholesalePriceResp 商品批发价响应，unit_price 固定输出为两位小数字符串。
+type WholesalePriceResp struct {
+	MinQuantity int    `json:"min_quantity"`
+	UnitPrice   string `json:"unit_price"`
+}
+
+// NewWholesalePriceRespList 统一公开 API 的批发价金额格式。
+func NewWholesalePriceRespList(tiers models.WholesalePriceTiers) []WholesalePriceResp {
+	if len(tiers) == 0 {
+		return nil
+	}
+	result := make([]WholesalePriceResp, 0, len(tiers))
+	for _, tier := range tiers {
+		if tier.MinQuantity <= 0 || tier.UnitPrice.Decimal.LessThanOrEqual(decimal.Zero) {
+			continue
+		}
+		result = append(result, WholesalePriceResp{
+			MinQuantity: tier.MinQuantity,
+			UnitPrice:   tier.UnitPrice.String(),
+		})
+	}
+	return result
+}
+
 // SKUResp 商品 SKU 公共响应
 type SKUResp struct {
-	ID                 uint         `json:"id"`
-	SKUCode            string       `json:"sku_code"`
-	SpecValues         models.JSON  `json:"spec_values"`
-	PriceAmount        models.Money `json:"price_amount"`
-	ManualStockTotal   int          `json:"manual_stock_total"`
-	ManualStockSold    int          `json:"manual_stock_sold"`
-	AutoStockAvailable int64        `json:"auto_stock_available"`
-	UpstreamStock      int          `json:"upstream_stock"`
-	IsActive           bool         `json:"is_active"`
+	ID                  uint         `json:"id"`
+	SKUCode             string       `json:"sku_code"`
+	SpecValues          models.JSON  `json:"spec_values"`
+	PriceAmount         models.Money `json:"price_amount"`
+	ManualStockTotal    int          `json:"manual_stock_total"`
+	ManualStockSold     int          `json:"manual_stock_sold"`
+	AutoStockAvailable  int64        `json:"auto_stock_available"`
+	UpstreamStock       int          `json:"upstream_stock"`
+	StockStatus         string       `json:"stock_status"`
+	StockDisplayMode    string       `json:"stock_display_mode"`
+	StockDisplay        string       `json:"stock_display"`
+	StockRangeMin       *int         `json:"stock_range_min,omitempty"`
+	StockRangeMax       *int         `json:"stock_range_max,omitempty"`
+	StockQuantityHidden bool         `json:"stock_quantity_hidden"`
+	IsSoldOut           bool         `json:"is_sold_out"`
+	IsActive            bool         `json:"is_active"`
 
 	// 促销/会员价附加
 	PromotionPriceAmount *models.Money `json:"promotion_price_amount,omitempty"`

@@ -1,8 +1,6 @@
 package public
 
 import (
-	"strconv"
-
 	"github.com/dujiao-next/internal/dto"
 	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/http/response"
@@ -17,9 +15,7 @@ func (h *Handler) GetMyLoginLogs(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	logs, total, err := h.UserLoginLogService.ListByUser(uid, page, pageSize)
 	if err != nil {

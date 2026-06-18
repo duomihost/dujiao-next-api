@@ -11,7 +11,6 @@ import (
 
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 const (
@@ -20,11 +19,13 @@ const (
 
 // WalletService 钱包服务
 type WalletService struct {
-	walletRepo     repository.WalletRepository
-	orderRepo      repository.OrderRepository
-	userRepo       repository.UserRepository
-	affiliateSvc   *AffiliateService
-	settingService *SettingService
+	walletRepo            repository.WalletRepository
+	orderRepo             repository.OrderRepository
+	refundRecordRepo      repository.OrderRefundRecordRepository
+	userRepo              repository.UserRepository
+	affiliateSvc          *AffiliateService
+	settingService        *SettingService
+	resellerAccountingSvc *ResellerAccountingService
 }
 
 // WalletRechargeInput 用户充值输入
@@ -65,17 +66,23 @@ type AdminRefundToWalletInput struct {
 func NewWalletService(
 	walletRepo repository.WalletRepository,
 	orderRepo repository.OrderRepository,
+	refundRecordRepo repository.OrderRefundRecordRepository,
 	userRepo repository.UserRepository,
 	affiliateSvc *AffiliateService,
 	settingService *SettingService,
 ) *WalletService {
 	return &WalletService{
-		walletRepo:     walletRepo,
-		orderRepo:      orderRepo,
-		userRepo:       userRepo,
-		affiliateSvc:   affiliateSvc,
-		settingService: settingService,
+		walletRepo:       walletRepo,
+		orderRepo:        orderRepo,
+		refundRecordRepo: refundRecordRepo,
+		userRepo:         userRepo,
+		affiliateSvc:     affiliateSvc,
+		settingService:   settingService,
 	}
+}
+
+func (s *WalletService) SetResellerAccountingService(svc *ResellerAccountingService) {
+	s.resellerAccountingSvc = svc
 }
 
 // GetAccount 获取钱包账户（不存在时自动创建）
@@ -106,6 +113,17 @@ func (s *WalletService) ListUserRechargeOrders(userID uint, page, pageSize int, 
 		PageSize:   pageSize,
 		UserID:     userID,
 		Status:     status,
+		RechargeNo: rechargeNo,
+	})
+}
+
+// StatsUserRechargeOrders 按状态聚合当前用户充值单数量（基于全量数据，仅复用关键词筛选）
+func (s *WalletService) StatsUserRechargeOrders(userID uint, rechargeNo string) (map[string]int64, error) {
+	if userID == 0 {
+		return nil, ErrWalletAccountNotFound
+	}
+	return s.walletRepo.StatsRechargeOrders(repository.WalletRechargeListFilter{
+		UserID:     userID,
 		RechargeNo: rechargeNo,
 	})
 }
@@ -212,14 +230,14 @@ func (s *WalletService) AdminRefundToWallet(input AdminRefundToWalletInput) (*mo
 	}
 
 	if err := s.walletRepo.Transaction(func(tx *gorm.DB) error {
-		var order models.Order
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			First(&order, input.OrderID).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
-				return ErrOrderNotFound
-			}
+		locked, err := s.orderRepo.WithTx(tx).GetByIDForUpdate(input.OrderID)
+		if err != nil {
 			return err
 		}
+		if locked == nil {
+			return ErrOrderNotFound
+		}
+		order := *locked
 		if order.UserID == 0 {
 			return ErrWalletNotSupportedForGuest
 		}
@@ -263,7 +281,7 @@ func (s *WalletService) AdminRefundToWallet(input AdminRefundToWalletInput) (*mo
 		} else {
 			updates["status"] = constants.OrderStatusPartiallyRefunded
 		}
-		if err := tx.Model(&models.Order{}).Where("id = ?", order.ID).Updates(updates).Error; err != nil {
+		if err := s.orderRepo.WithTx(tx).UpdateFields(order.ID, updates); err != nil {
 			return ErrOrderUpdateFailed
 		}
 		if order.ParentID == nil {
@@ -271,7 +289,7 @@ func (s *WalletService) AdminRefundToWallet(input AdminRefundToWalletInput) (*mo
 			if markRefunded {
 				targetStatus = constants.OrderStatusRefunded
 			}
-			if err := applyParentRefundChildStatusUpdatesTx(tx, order.ID, targetStatus, now); err != nil {
+			if err := applyParentRefundChildStatusUpdates(s.orderRepo.WithTx(tx), order.ID, targetStatus, now); err != nil {
 				return ErrOrderUpdateFailed
 			}
 		}
@@ -320,8 +338,13 @@ func (s *WalletService) AdminRefundToWallet(input AdminRefundToWalletInput) (*mo
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
-		if err := tx.Create(record).Error; err != nil {
+		if err := s.refundRecordRepo.WithTx(tx).Create(record); err != nil {
 			return ErrRefundRecordCreateFailed
+		}
+		if s.resellerAccountingSvc != nil {
+			if err := s.resellerAccountingSvc.HandleRefundDeductTx(tx, &order, record, refundedBefore); err != nil {
+				return err
+			}
 		}
 		txnResult = txn
 		refundRecordResult = record
@@ -420,11 +443,11 @@ func (s *WalletService) ApplyOrderBalance(tx *gorm.DB, order *models.Order, useB
 	}
 
 	onlineAmount := normalizeOrderAmount(order.TotalAmount.Decimal.Sub(deduct))
-	if err := tx.Model(&models.Order{}).Where("id = ?", order.ID).Updates(map[string]interface{}{
+	if err := s.orderRepo.WithTx(tx).UpdateFields(order.ID, map[string]interface{}{
 		"wallet_paid_amount": models.NewMoneyFromDecimal(deduct),
 		"online_paid_amount": models.NewMoneyFromDecimal(onlineAmount),
 		"updated_at":         now,
-	}).Error; err != nil {
+	}); err != nil {
 		return decimal.Zero, ErrOrderUpdateFailed
 	}
 	order.WalletPaidAmount = models.NewMoneyFromDecimal(deduct)
@@ -457,15 +480,15 @@ func (s *WalletService) ReleaseOrderBalance(tx *gorm.DB, order *models.Order, tx
 		return exists.Amount.Decimal.Round(2), nil
 	}
 
-	result := tx.Model(&models.Order{}).Where("id = ? AND wallet_paid_amount > 0", order.ID).Updates(map[string]interface{}{
+	affected, err := s.orderRepo.WithTx(tx).UpdateFieldsWhereWalletPaid(order.ID, map[string]interface{}{
 		"wallet_paid_amount": models.NewMoneyFromDecimal(decimal.Zero),
 		"online_paid_amount": models.NewMoneyFromDecimal(order.TotalAmount.Decimal.Round(2)),
 		"updated_at":         now,
 	})
-	if result.Error != nil {
+	if err != nil {
 		return decimal.Zero, ErrOrderUpdateFailed
 	}
-	if result.RowsAffected == 0 {
+	if affected == 0 {
 		return decimal.Zero, nil
 	}
 

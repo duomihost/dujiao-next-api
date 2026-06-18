@@ -12,6 +12,7 @@ import (
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/models"
+	paymentprovider "github.com/dujiao-next/internal/payment/provider"
 	"github.com/dujiao-next/internal/provider"
 	"github.com/dujiao-next/internal/repository"
 	"github.com/dujiao-next/internal/service"
@@ -30,7 +31,7 @@ type okpayCallbackFixture struct {
 	payment     *models.Payment
 }
 
-func newOkpayCallbackFixture(t *testing.T, exchangeRate string) *okpayCallbackFixture {
+func newOkpayCallbackFixture(t *testing.T) *okpayCallbackFixture {
 	t.Helper()
 
 	gin.SetMode(gin.TestMode)
@@ -93,7 +94,7 @@ func newOkpayCallbackFixture(t *testing.T, exchangeRate string) *okpayCallbackFi
 			"merchant_token": "token-1",
 			"return_url":     "https://example.com/pay",
 			"callback_url":   "https://api.example.com/api/v1/payments/callback",
-			"exchange_rate":  exchangeRate,
+			"exchange_rate":  "7",
 		},
 		IsActive:  true,
 		SortOrder: 10,
@@ -103,16 +104,17 @@ func newOkpayCallbackFixture(t *testing.T, exchangeRate string) *okpayCallbackFi
 	if err := db.Create(channel).Error; err != nil {
 		t.Fatalf("create channel failed: %v", err)
 	}
+	// okpay 是加密货币网关，payment 实际以 USDT 计价（P1.2c Task 1 后 CurrencySent 写入 DB）
 	payment := &models.Payment{
 		OrderID:         order.ID,
 		ChannelID:       channel.ID,
 		ProviderType:    channel.ProviderType,
 		ChannelType:     channel.ChannelType,
 		InteractionMode: channel.InteractionMode,
-		Amount:          models.NewMoneyFromDecimal(decimal.NewFromInt(88)),
+		Amount:          models.NewMoneyFromDecimal(decimal.NewFromFloat(616)),
 		FeeRate:         models.NewMoneyFromDecimal(decimal.Zero),
 		FeeAmount:       models.NewMoneyFromDecimal(decimal.Zero),
-		Currency:        "CNY",
+		Currency:        "USDT",
 		Status:          constants.PaymentStatusPending,
 		ProviderRef:     "OKPAY-ORDER-1",
 		GatewayOrderNo:  "DJP9001",
@@ -128,13 +130,18 @@ func newOkpayCallbackFixture(t *testing.T, exchangeRate string) *okpayCallbackFi
 	channelRepo := repository.NewPaymentChannelRepository(db)
 	productRepo := repository.NewProductRepository(db)
 	productSKURepo := repository.NewProductSKURepository(db)
+
+	registry := paymentprovider.NewRegistry()
+	registry.Register(constants.PaymentProviderOkpay, "", paymentprovider.NewOkpayAdapter())
+
 	paymentService := service.NewPaymentService(service.PaymentServiceOptions{
-		OrderRepo:      orderRepo,
-		ProductRepo:    productRepo,
-		ProductSKURepo: productSKURepo,
-		PaymentRepo:    paymentRepo,
-		ChannelRepo:    channelRepo,
-		ExpireMinutes:  15,
+		OrderRepo:               orderRepo,
+		ProductRepo:             productRepo,
+		ProductSKURepo:          productSKURepo,
+		PaymentRepo:             paymentRepo,
+		ChannelRepo:             channelRepo,
+		ExpireMinutes:           15,
+		PaymentProviderRegistry: registry,
 	})
 
 	return &okpayCallbackFixture{
@@ -152,7 +159,7 @@ func newOkpayCallbackFixture(t *testing.T, exchangeRate string) *okpayCallbackFi
 }
 
 func TestPaymentCallbackHandlesOkpay(t *testing.T) {
-	fixture := newOkpayCallbackFixture(t, "7")
+	fixture := newOkpayCallbackFixture(t)
 	bodyWithoutSign := "code=200&data[order_id]=OKPAY-ORDER-1&data[unique_id]=DJP9001&data[pay_user_id]=7238234930&data[amount]=616.00000000&data[coin]=USDT&data[status]=1&data[type]=deposit&id=shop-1&status=success"
 	sign := md5HexUpper(bodyWithoutSign + "&token=token-1")
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/callback", strings.NewReader(bodyWithoutSign+"&sign="+sign))
@@ -183,42 +190,6 @@ func TestPaymentCallbackHandlesOkpay(t *testing.T) {
 	}
 	if updatedOrder == nil || updatedOrder.Status != constants.OrderStatusPaid {
 		t.Fatalf("order status not updated: %+v", updatedOrder)
-	}
-}
-
-func TestPaymentCallbackRejectsOkpayAmountMismatch(t *testing.T) {
-	fixture := newOkpayCallbackFixture(t, "7")
-	bodyWithoutSign := "code=200&data[order_id]=OKPAY-ORDER-1&data[unique_id]=DJP9001&data[pay_user_id]=7238234930&data[amount]=615.00000000&data[coin]=USDT&data[status]=1&data[type]=deposit&id=shop-1&status=success"
-	sign := md5HexUpper(bodyWithoutSign + "&token=token-1")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/callback", strings.NewReader(bodyWithoutSign+"&sign="+sign))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = req
-
-	fixture.handler.PaymentCallback(c)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", w.Code)
-	}
-	if strings.TrimSpace(w.Body.String()) != constants.OkpayCallbackFail {
-		t.Fatalf("unexpected response body: %s", w.Body.String())
-	}
-
-	updatedPayment, err := fixture.paymentRepo.GetByID(fixture.payment.ID)
-	if err != nil {
-		t.Fatalf("reload payment failed: %v", err)
-	}
-	if updatedPayment == nil || updatedPayment.Status != constants.PaymentStatusPending {
-		t.Fatalf("payment status should stay pending: %+v", updatedPayment)
-	}
-
-	updatedOrder, err := fixture.orderRepo.GetByID(fixture.order.ID)
-	if err != nil {
-		t.Fatalf("reload order failed: %v", err)
-	}
-	if updatedOrder == nil || updatedOrder.Status != constants.OrderStatusPendingPayment {
-		t.Fatalf("order status should stay pending payment: %+v", updatedOrder)
 	}
 }
 

@@ -43,20 +43,21 @@ func (c *Consumer) Register(mux *asynq.ServeMux) {
 		logger.Debugw("worker_register_skip_nil", "consumer_nil", c == nil, "mux_nil", mux == nil)
 		return
 	}
-	mux.HandleFunc(queue.TaskOrderStatusEmail, c.handleOrderStatusEmail)
-	mux.HandleFunc(queue.TaskOrderAutoFulfill, c.handleOrderAutoFulfill)
-	mux.HandleFunc(queue.TaskOrderTimeoutCancel, c.handleOrderTimeoutCancel)
-	mux.HandleFunc(queue.TaskWalletRechargeExpire, c.handleWalletRechargeExpire)
-	mux.HandleFunc(queue.TaskNotificationDispatch, c.handleNotificationDispatch)
-	mux.HandleFunc(queue.TaskAffiliateConfirmCommissions, c.handleAffiliateConfirmCommissions)
-	mux.HandleFunc(queue.TaskUpstreamSyncStock, c.handleUpstreamSyncStock)
-	mux.HandleFunc(queue.TaskProcurementSubmit, c.handleProcurementSubmit)
-	mux.HandleFunc(queue.TaskProcurementPollStatus, c.handleProcurementPollStatus)
-	mux.HandleFunc(queue.TaskProcurementSyncAccepted, c.handleProcurementSyncAccepted)
-	mux.HandleFunc(queue.TaskDownstreamCallback, c.handleDownstreamCallback)
-	mux.HandleFunc(queue.TaskReconciliationRun, c.handleReconciliationRun)
-	mux.HandleFunc(queue.TaskBotNotify, c.handleBotNotify)
-	mux.HandleFunc(queue.TaskTelegramBroadcast, c.handleTelegramBroadcast)
+	mux.HandleFunc(queue.TaskOrderStatusEmail, withPanicRecovery(queue.TaskOrderStatusEmail, c.handleOrderStatusEmail))
+	mux.HandleFunc(queue.TaskOrderAutoFulfill, withPanicRecovery(queue.TaskOrderAutoFulfill, c.handleOrderAutoFulfill))
+	mux.HandleFunc(queue.TaskOrderTimeoutCancel, withPanicRecovery(queue.TaskOrderTimeoutCancel, c.handleOrderTimeoutCancel))
+	mux.HandleFunc(queue.TaskWalletRechargeExpire, withPanicRecovery(queue.TaskWalletRechargeExpire, c.handleWalletRechargeExpire))
+	mux.HandleFunc(queue.TaskNotificationDispatch, withPanicRecovery(queue.TaskNotificationDispatch, c.handleNotificationDispatch))
+	mux.HandleFunc(queue.TaskAffiliateConfirmCommissions, withPanicRecovery(queue.TaskAffiliateConfirmCommissions, c.handleAffiliateConfirmCommissions))
+	mux.HandleFunc(queue.TaskResellerConfirmLedger, withPanicRecovery(queue.TaskResellerConfirmLedger, c.handleResellerConfirmLedger))
+	mux.HandleFunc(queue.TaskUpstreamSyncStock, withPanicRecovery(queue.TaskUpstreamSyncStock, c.handleUpstreamSyncStock))
+	mux.HandleFunc(queue.TaskProcurementSubmit, withPanicRecovery(queue.TaskProcurementSubmit, c.handleProcurementSubmit))
+	mux.HandleFunc(queue.TaskProcurementPollStatus, withPanicRecovery(queue.TaskProcurementPollStatus, c.handleProcurementPollStatus))
+	mux.HandleFunc(queue.TaskProcurementSyncAccepted, withPanicRecovery(queue.TaskProcurementSyncAccepted, c.handleProcurementSyncAccepted))
+	mux.HandleFunc(queue.TaskDownstreamCallback, withPanicRecovery(queue.TaskDownstreamCallback, c.handleDownstreamCallback))
+	mux.HandleFunc(queue.TaskReconciliationRun, withPanicRecovery(queue.TaskReconciliationRun, c.handleReconciliationRun))
+	mux.HandleFunc(queue.TaskBotNotify, withPanicRecovery(queue.TaskBotNotify, c.handleBotNotify))
+	mux.HandleFunc(queue.TaskTelegramBroadcast, withPanicRecovery(queue.TaskTelegramBroadcast, c.handleTelegramBroadcast))
 }
 
 // handleOrderStatusEmail 处理订单状态邮件发送任务。
@@ -74,6 +75,23 @@ func (c *Consumer) handleOrderStatusEmail(_ context.Context, task *asynq.Task) e
 		logger.Debugw("worker_order_status_email_skip_invalid_payload", "order_id", payload.OrderID)
 		return nil
 	}
+	// 消费侧二次校验开关：避免 SMTP/订单通知关闭后，旧任务（含 retry/scheduled 中的任务）继续触发发送。
+	if c.SettingService != nil && c.Config != nil {
+		smtpSetting, smtpErr := c.SettingService.GetSMTPSetting(c.Config.Email)
+		if smtpErr != nil {
+			// fail-closed：读不到设置就视作关闭，不重试，避免 DB 抖动放大成邮件雪崩。
+			logger.Warnw("worker_order_status_email_load_smtp_setting_failed", "order_id", payload.OrderID, "error", smtpErr)
+			return nil
+		}
+		if !smtpSetting.Enabled || !smtpSetting.OrderNotificationEnabled {
+			logger.Debugw("worker_order_status_email_skip_setting_disabled",
+				"order_id", payload.OrderID,
+				"smtp_enabled", smtpSetting.Enabled,
+				"order_notification_enabled", smtpSetting.OrderNotificationEnabled,
+			)
+			return nil
+		}
+	}
 	order, err := c.OrderRepo.GetByID(payload.OrderID)
 	if err != nil {
 		logger.Warnw("worker_order_status_email_fetch_order_failed", "order_id", payload.OrderID, "error", err)
@@ -82,6 +100,21 @@ func (c *Consumer) handleOrderStatusEmail(_ context.Context, task *asynq.Task) e
 	if order == nil {
 		logger.Debugw("worker_order_status_email_skip_order_not_found", "order_id", payload.OrderID)
 		return nil
+	}
+	// 游客订单的"取消"通知价值极低（用户大概率已离开），但极易被滥用为退信轰炸载体：
+	// 攻击者可用伪造邮箱批量下单等过期取消触发发送。统一不发，保留登录用户与其它状态。
+	if order.UserID == 0 {
+		emailStatus := strings.TrimSpace(payload.Status)
+		if emailStatus == "" {
+			emailStatus = order.Status
+		}
+		if emailStatus == constants.OrderStatusCanceled {
+			logger.Debugw("worker_order_status_email_skip_guest_canceled",
+				"order_id", order.ID,
+				"order_no", order.OrderNo,
+			)
+			return nil
+		}
 	}
 	var receiverEmail string
 	var locale string
@@ -360,6 +393,20 @@ func (c *Consumer) handleAffiliateConfirmCommissions(_ context.Context, _ *asynq
 		logger.Warnw("worker_affiliate_confirm_due_failed", "error", err)
 		return err
 	}
+	return nil
+}
+
+func (c *Consumer) handleResellerConfirmLedger(_ context.Context, _ *asynq.Task) error {
+	if c == nil || c.ResellerAccountingService == nil {
+		logger.Debugw("worker_reseller_confirm_ledger_skip_nil", "consumer_nil", c == nil)
+		return nil
+	}
+	affected, err := c.ResellerAccountingService.ConfirmDueLedgerEntries(time.Now())
+	if err != nil {
+		logger.Warnw("worker_reseller_confirm_ledger_failed", "error", err)
+		return err
+	}
+	logger.Debugw("worker_reseller_confirm_ledger_ok", "affected", affected)
 	return nil
 }
 

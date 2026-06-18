@@ -31,6 +31,30 @@ func (s *CategoryService) List() ([]models.Category, error) {
 	return s.repo.List()
 }
 
+// ListActive 获取启用的分类列表
+func (s *CategoryService) ListActive() ([]models.Category, error) {
+	return s.repo.ListActive()
+}
+
+// SetActive 切换分类启用状态
+func (s *CategoryService) SetActive(id string, active bool) (*models.Category, error) {
+	category, err := s.repo.GetByID(id)
+	if err != nil {
+		return nil, err
+	}
+	if category == nil {
+		return nil, ErrNotFound
+	}
+	if category.IsActive == active {
+		return category, nil
+	}
+	if err := s.repo.UpdateActive(id, active); err != nil {
+		return nil, err
+	}
+	category.IsActive = active
+	return category, nil
+}
+
 // Create 创建分类
 func (s *CategoryService) Create(input CreateCategoryInput) (*models.Category, error) {
 	if err := s.validateParent(nil, input.ParentID); err != nil {
@@ -51,6 +75,7 @@ func (s *CategoryService) Create(input CreateCategoryInput) (*models.Category, e
 		NameJSON:  models.JSON(input.NameJSON),
 		Icon:      input.Icon,
 		SortOrder: input.SortOrder,
+		IsActive:  true,
 	}
 	if err := s.repo.Create(&category); err != nil {
 		return nil, err

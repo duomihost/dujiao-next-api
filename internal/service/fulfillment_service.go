@@ -101,11 +101,10 @@ func (s *FulfillmentService) CreateManual(input CreateManualInput) (*models.Fulf
 
 	var created *models.Fulfillment
 	err = s.orderRepo.Transaction(func(tx *gorm.DB) error {
-		var existing models.Fulfillment
-		if err := tx.Where("order_id = ?", input.OrderID).First(&existing).Error; err == nil {
-			return ErrFulfillmentExists
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		if _, found, err := s.fulfillmentRepo.WithTx(tx).FindByOrderIDForUpdate(input.OrderID); err != nil {
 			return err
+		} else if found {
+			return ErrFulfillmentExists
 		}
 
 		fulfillment := &models.Fulfillment{
@@ -120,13 +119,13 @@ func (s *FulfillmentService) CreateManual(input CreateManualInput) (*models.Fulf
 			UpdatedAt:     now,
 		}
 
-		if err := tx.Create(fulfillment).Error; err != nil {
+		if err := s.fulfillmentRepo.WithTx(tx).Create(fulfillment); err != nil {
 			return ErrFulfillmentCreateFailed
 		}
-		if err := tx.Model(&models.Order{}).Where("id = ?", order.ID).Updates(map[string]interface{}{
+		if err := s.orderRepo.WithTx(tx).UpdateFields(order.ID, map[string]interface{}{
 			"status":     constants.OrderStatusDelivered,
 			"updated_at": now,
-		}).Error; err != nil {
+		}); err != nil {
 			return ErrOrderUpdateFailed
 		}
 		created = fulfillment
@@ -220,11 +219,10 @@ func (s *FulfillmentService) CreateAuto(orderID uint) (*models.Fulfillment, erro
 	now := time.Now()
 	var fulfillment *models.Fulfillment
 	err = s.orderRepo.Transaction(func(tx *gorm.DB) error {
-		var existing models.Fulfillment
-		if err := tx.Where("order_id = ?", orderID).First(&existing).Error; err == nil {
-			return ErrFulfillmentExists
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		if _, found, err := s.fulfillmentRepo.WithTx(tx).FindByOrderIDForUpdate(orderID); err != nil {
 			return err
+		} else if found {
+			return ErrFulfillmentExists
 		}
 
 		if s.secretRepo == nil {
@@ -259,12 +257,8 @@ func (s *FulfillmentService) CreateAuto(orderID uint) (*models.Fulfillment, erro
 
 			if len(selected) < item.Quantity {
 				need := item.Quantity - len(selected)
-				var availableRows []models.CardSecret
-				query := tx.Where("product_id = ? AND status = ?", item.ProductID, models.CardSecretStatusAvailable)
-				if item.SKUID > 0 {
-					query = query.Where("sku_id = ?", item.SKUID)
-				}
-				if err := query.Order("id asc").Limit(need).Find(&availableRows).Error; err != nil {
+				availableRows, err := secretRepo.ListAvailableByProduct(item.ProductID, item.SKUID, need)
+				if err != nil {
 					return err
 				}
 				selected = append(selected, availableRows...)
@@ -300,13 +294,13 @@ func (s *FulfillmentService) CreateAuto(orderID uint) (*models.Fulfillment, erro
 			CreatedAt:   now,
 			UpdatedAt:   now,
 		}
-		if err := tx.Create(fulfillment).Error; err != nil {
+		if err := s.fulfillmentRepo.WithTx(tx).Create(fulfillment); err != nil {
 			return ErrFulfillmentCreateFailed
 		}
-		if err := tx.Model(&models.Order{}).Where("id = ?", orderID).Updates(map[string]interface{}{
+		if err := s.orderRepo.WithTx(tx).UpdateFields(orderID, map[string]interface{}{
 			"status":     constants.OrderStatusCompleted,
 			"updated_at": now,
-		}).Error; err != nil {
+		}); err != nil {
 			return ErrOrderUpdateFailed
 		}
 		return nil

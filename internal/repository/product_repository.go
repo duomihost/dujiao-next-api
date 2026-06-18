@@ -58,7 +58,8 @@ func (r *GormProductRepository) List(filter ProductListFilter) ([]models.Product
 		query = query.Preload("Category")
 	}
 	if filter.OnlyActive {
-		query = query.Where("is_active = ?", true)
+		query = query.Where("products.is_active = ?", true)
+		query = query.Where("EXISTS (SELECT 1 FROM categories c WHERE c.id = products.category_id AND c.is_active = ? AND c.deleted_at IS NULL)", true)
 		query = query.Preload("SKUs", func(db *gorm.DB) *gorm.DB {
 			return db.Where("is_active = ?", true).Order("sort_order DESC, id ASC")
 		})
@@ -71,6 +72,9 @@ func (r *GormProductRepository) List(filter ProductListFilter) ([]models.Product
 		query = query.Where("category_id IN ?", filter.CategoryIDs)
 	} else if filter.CategoryID != "" {
 		query = query.Where("category_id = ?", filter.CategoryID)
+	}
+	if len(filter.ExcludeProductIDs) > 0 {
+		query = query.Where("products.id NOT IN ?", filter.ExcludeProductIDs)
 	}
 	if fulfillmentType := strings.TrimSpace(filter.FulfillmentType); fulfillmentType != "" {
 		query = query.Where("fulfillment_type = ?", fulfillmentType)
@@ -98,6 +102,14 @@ func (r *GormProductRepository) List(filter ProductListFilter) ([]models.Product
 
 	stockStatus := strings.ToLower(strings.TrimSpace(filter.StockStatus))
 	query = applyStockStatusFilter(query, stockStatus, filter.LowStockThreshold)
+	if filter.HasWholesalePrices != nil {
+		expr := jsonArrayLengthExpr(r.db, "wholesale_prices")
+		if *filter.HasWholesalePrices {
+			query = query.Where(expr + " > 0")
+		} else {
+			query = query.Where(expr + " = 0")
+		}
+	}
 
 	var total int64
 	if err := query.Count(&total).Error; err != nil {
@@ -175,9 +187,10 @@ func applyStockStatusFilter(query *gorm.DB, status string, lowStockThreshold int
 
 // GetBySlug 根据 slug 获取商品
 func (r *GormProductRepository) GetBySlug(slug string, onlyActive bool) (*models.Product, error) {
-	query := r.db.Preload("Category").Where("slug = ?", slug)
+	query := r.db.Preload("Category").Where("products.slug = ?", slug)
 	if onlyActive {
-		query = query.Where("is_active = ?", true)
+		query = query.Where("products.is_active = ?", true)
+		query = query.Where("EXISTS (SELECT 1 FROM categories c WHERE c.id = products.category_id AND c.is_active = ? AND c.deleted_at IS NULL)", true)
 		query = query.Preload("SKUs", func(db *gorm.DB) *gorm.DB {
 			return db.Where("is_active = ?", true).Order("sort_order DESC, id ASC")
 		})

@@ -6,52 +6,35 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dujiao-next/internal/constants"
-
 	"github.com/gin-gonic/gin"
 )
 
-func TestMapAlipayTradeStatus(t *testing.T) {
-	if status, ok := mapAlipayTradeStatus(constants.AlipayTradeStatusSuccess); !ok || status != constants.PaymentStatusSuccess {
-		t.Fatalf("expected success mapping, got %s %v", status, ok)
+func TestParseCallbackFormNormalizesNonStandardQuery(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cases := map[string]string{
+		"semicolon separator":    "/api/v1/payments/callback?pid=2026;out_trade_no=ORDER-1;trade_status=TRADE_SUCCESS;sign=abc",
+		"html escaped ampersand": "/api/v1/payments/callback?pid=2026&amp;out_trade_no=ORDER-1&amp;trade_status=TRADE_SUCCESS&amp;sign=abc",
 	}
-	if status, ok := mapAlipayTradeStatus(constants.AlipayTradeStatusWaitBuyerPay); !ok || status != constants.PaymentStatusPending {
-		t.Fatalf("expected pending mapping, got %s %v", status, ok)
-	}
-	if status, ok := mapAlipayTradeStatus(constants.AlipayTradeStatusClosed); !ok || status != constants.PaymentStatusFailed {
-		t.Fatalf("expected failed mapping, got %s %v", status, ok)
-	}
-	if status, ok := mapAlipayTradeStatus("UNKNOWN"); ok || status != "" {
-		t.Fatalf("expected unknown mapping, got %s %v", status, ok)
-	}
-}
+	for name, target := range cases {
+		t.Run(name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodGet, target, nil)
 
-func TestParseAlipayCallback(t *testing.T) {
-	form := map[string][]string{
-		"out_trade_no": {"ORDER-1"},
-		"trade_no":     {"202602090001"},
-		"trade_status": {"TRADE_SUCCESS"},
-		"total_amount": {"18.80"},
-		"gmt_payment":  {"2026-02-09 23:30:00"},
-	}
-	input, err := parseAlipayCallback(form, 1001)
-	if err != nil {
-		t.Fatalf("parse alipay callback failed: %v", err)
-	}
-	if input.PaymentID != 1001 {
-		t.Fatalf("expected payment id 1001, got %d", input.PaymentID)
-	}
-	if input.Status != constants.PaymentStatusSuccess {
-		t.Fatalf("expected success status, got %s", input.Status)
-	}
-	if input.ProviderRef != "202602090001" {
-		t.Fatalf("expected provider ref trade_no, got %s", input.ProviderRef)
-	}
-	if input.Amount.String() != "18.80" {
-		t.Fatalf("expected amount 18.80, got %s", input.Amount.String())
-	}
-	if input.PaidAt == nil {
-		t.Fatalf("expected paid_at parsed")
+			form, err := parseCallbackForm(c)
+			if err != nil {
+				t.Fatalf("parse callback form failed: %v", err)
+			}
+			if got := getFirstValue(form, "out_trade_no"); got != "ORDER-1" {
+				t.Fatalf("unexpected out_trade_no: %q", got)
+			}
+			if got := getFirstValue(form, "trade_status"); got != "TRADE_SUCCESS" {
+				t.Fatalf("unexpected trade_status: %q", got)
+			}
+			if got := getFirstValue(form, "sign"); got != "abc" {
+				t.Fatalf("unexpected sign: %q", got)
+			}
+		})
 	}
 }
 

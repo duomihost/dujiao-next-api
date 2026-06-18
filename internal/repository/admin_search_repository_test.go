@@ -58,6 +58,14 @@ func TestUserRepositoryListSupportsOAuthKeyword(t *testing.T) {
 	if total != 1 || len(users) != 1 || users[0].ID != user1.ID {
 		t.Fatalf("unexpected result by provider user id: total=%d users=%+v", total, users)
 	}
+
+	users, total, err = userRepo.List(UserListFilter{Page: 1, PageSize: 20, UserID: user2.ID})
+	if err != nil {
+		t.Fatalf("list by user id failed: %v", err)
+	}
+	if total != 1 || len(users) != 1 || users[0].ID != user2.ID {
+		t.Fatalf("unexpected result by user id: total=%d users=%+v", total, users)
+	}
 }
 
 func TestOrderRepositoryListAdminSupportsUserKeyword(t *testing.T) {

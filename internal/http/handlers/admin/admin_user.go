@@ -2,7 +2,7 @@ package admin
 
 import (
 	"encoding/json"
-	"strconv"
+	"errors"
 	"strings"
 	"time"
 
@@ -21,12 +21,13 @@ import (
 
 // UpdateAdminUserRequest 管理员更新用户请求
 type UpdateAdminUserRequest struct {
-	Nickname  *string `json:"nickname"`
-	Locale    *string `json:"locale"`
-	Status    *string `json:"status"`
-	Email     *string `json:"email"`
-	Password  *string `json:"password"`
-	AdminNote *string `json:"admin_note"`
+	Nickname      *string `json:"nickname"`
+	Locale        *string `json:"locale"`
+	Status        *string `json:"status"`
+	Email         *string `json:"email"`
+	Password      *string `json:"password"`
+	AdminNote     *string `json:"admin_note"`
+	EmailVerified *bool   `json:"email_verified"`
 }
 
 // BatchUpdateUserStatusRequest 批量更新用户状态请求
@@ -80,33 +81,22 @@ type AdminUserDetail struct {
 
 // GetAdminUsers 获取用户列表
 func (h *Handler) GetAdminUsers(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
+	userID, err := shared.ParseQueryUint(c.Query("user_id"), true)
+	if err != nil {
+		shared.RespondError(c, response.CodeBadRequest, "error.user_id_invalid", err)
+		return
+	}
 	keyword := strings.TrimSpace(c.Query("keyword"))
 	status := strings.TrimSpace(c.Query("status"))
-	createdFromRaw := strings.TrimSpace(c.Query("created_from"))
-	createdToRaw := strings.TrimSpace(c.Query("created_to"))
-	lastLoginFromRaw := strings.TrimSpace(c.Query("last_login_from"))
-	lastLoginToRaw := strings.TrimSpace(c.Query("last_login_to"))
 
-	createdFrom, err := shared.ParseTimeNullable(createdFromRaw)
+	createdFrom, createdTo, err := shared.ParseQueryTimeRange(c, "created_from", "created_to")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
 	}
-	createdTo, err := shared.ParseTimeNullable(createdToRaw)
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
-	lastLoginFrom, err := shared.ParseTimeNullable(lastLoginFromRaw)
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
-	lastLoginTo, err := shared.ParseTimeNullable(lastLoginToRaw)
+	lastLoginFrom, lastLoginTo, err := shared.ParseQueryTimeRange(c, "last_login_from", "last_login_to")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
@@ -115,12 +105,15 @@ func (h *Handler) GetAdminUsers(c *gin.Context) {
 	users, total, err := h.UserRepo.List(repository.UserListFilter{
 		Page:          page,
 		PageSize:      pageSize,
+		UserID:        userID,
 		Keyword:       keyword,
 		Status:        status,
 		CreatedFrom:   createdFrom,
 		CreatedTo:     createdTo,
 		LastLoginFrom: lastLoginFrom,
 		LastLoginTo:   lastLoginTo,
+		SortBy:        strings.TrimSpace(c.Query("sort_by")),
+		SortOrder:     strings.TrimSpace(c.Query("sort_order")),
 	})
 	if err != nil {
 		shared.RespondError(c, response.CodeInternal, "error.user_fetch_failed", err)
@@ -289,6 +282,19 @@ func (h *Handler) UpdateAdminUser(c *gin.Context) {
 		updated = true
 	}
 
+	if req.EmailVerified != nil {
+		if *req.EmailVerified {
+			if user.EmailVerifiedAt == nil {
+				now := time.Now()
+				user.EmailVerifiedAt = &now
+				updated = true
+			}
+		} else if user.EmailVerifiedAt != nil {
+			user.EmailVerifiedAt = nil
+			updated = true
+		}
+	}
+
 	if !updated {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", nil)
 		return
@@ -309,6 +315,34 @@ func (h *Handler) UpdateAdminUser(c *gin.Context) {
 	response.Success(c, user)
 }
 
+// UnbindAdminUserTelegram 管理员解除目标用户的 Telegram 绑定。
+// DELETE /admin/users/:id/oauth/telegram
+func (h *Handler) UnbindAdminUserTelegram(c *gin.Context) {
+	userID, err := shared.ParseParamUint(c, "id")
+	if err != nil {
+		shared.RespondError(c, response.CodeBadRequest, "error.user_id_invalid", nil)
+		return
+	}
+
+	if err := h.UserAuthService.UnbindTelegram(userID); err != nil {
+		switch {
+		case errors.Is(err, service.ErrNotFound):
+			shared.RespondError(c, response.CodeNotFound, "error.user_not_found", nil)
+		case errors.Is(err, service.ErrUserDisabled):
+			shared.RespondError(c, response.CodeBadRequest, "error.user_disabled", nil)
+		case errors.Is(err, service.ErrUserOAuthNotBound):
+			shared.RespondError(c, response.CodeBadRequest, "error.telegram_not_bound", nil)
+		case errors.Is(err, service.ErrTelegramUnbindRequiresEmail):
+			shared.RespondError(c, response.CodeBadRequest, "error.telegram_unbind_requires_email", nil)
+		default:
+			shared.RespondError(c, response.CodeInternal, "error.user_update_failed", err)
+		}
+		return
+	}
+
+	response.Success(c, gin.H{"unbound": true})
+}
+
 // GetAdminUserCouponUsages 获取用户优惠券使用记录
 func (h *Handler) GetAdminUserCouponUsages(c *gin.Context) {
 	userID, err := shared.ParseParamUint(c, "id")
@@ -317,9 +351,7 @@ func (h *Handler) GetAdminUserCouponUsages(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	usages, total, err := h.CouponUsageRepo.ListByUser(repository.CouponUsageListFilter{
 		Page:     page,

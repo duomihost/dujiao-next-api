@@ -9,23 +9,31 @@ import (
 
 // OrderSummary 订单列表响应（精简字段）
 type OrderSummary struct {
-	OrderNo     string          `json:"order_no"`
-	Status      string          `json:"status"`
-	Currency    string          `json:"currency"`
-	TotalAmount models.Money    `json:"total_amount"`
-	CreatedAt   time.Time       `json:"created_at"`
-	Items       []OrderItemResp `json:"items,omitempty"`
-	Children    []OrderSummary  `json:"children,omitempty"`
+	OrderNo                 string          `json:"order_no"`
+	Status                  string          `json:"status"`
+	Currency                string          `json:"currency"`
+	DiscountAmount          models.Money    `json:"discount_amount"`
+	MemberDiscountAmount    models.Money    `json:"member_discount_amount"`
+	PromotionDiscountAmount models.Money    `json:"promotion_discount_amount"`
+	WholesaleDiscountAmount models.Money    `json:"wholesale_discount_amount"`
+	TotalAmount             models.Money    `json:"total_amount"`
+	CreatedAt               time.Time       `json:"created_at"`
+	Items                   []OrderItemResp `json:"items,omitempty"`
+	Children                []OrderSummary  `json:"children,omitempty"`
 }
 
 // NewOrderSummary 从 models.Order 构造 OrderSummary
 func NewOrderSummary(o *models.Order) OrderSummary {
 	s := OrderSummary{
-		OrderNo:     o.OrderNo,
-		Status:      o.Status,
-		Currency:    o.Currency,
-		TotalAmount: o.TotalAmount,
-		CreatedAt:   o.CreatedAt,
+		OrderNo:                 o.OrderNo,
+		Status:                  o.Status,
+		Currency:                o.Currency,
+		DiscountAmount:          o.DiscountAmount,
+		MemberDiscountAmount:    o.MemberDiscountAmount,
+		PromotionDiscountAmount: o.PromotionDiscountAmount,
+		WholesaleDiscountAmount: o.WholesaleDiscountAmount,
+		TotalAmount:             o.TotalAmount,
+		CreatedAt:               o.CreatedAt,
 	}
 	for _, item := range o.Items {
 		resp := newOrderItemResp(&item)
@@ -59,6 +67,7 @@ type OrderDetail struct {
 	DiscountAmount           models.Money      `json:"discount_amount"`
 	MemberDiscountAmount     models.Money      `json:"member_discount_amount"`
 	PromotionDiscountAmount  models.Money      `json:"promotion_discount_amount"`
+	WholesaleDiscountAmount  models.Money      `json:"wholesale_discount_amount"`
 	TotalAmount              models.Money      `json:"total_amount"`
 	WalletPaidAmount         models.Money      `json:"wallet_paid_amount"`
 	OnlinePaidAmount         models.Money      `json:"online_paid_amount"`
@@ -96,6 +105,7 @@ func NewOrderDetail(o *models.Order) OrderDetail {
 		DiscountAmount:          o.DiscountAmount,
 		MemberDiscountAmount:    o.MemberDiscountAmount,
 		PromotionDiscountAmount: o.PromotionDiscountAmount,
+		WholesaleDiscountAmount: o.WholesaleDiscountAmount,
 		TotalAmount:             o.TotalAmount,
 		WalletPaidAmount:        o.WalletPaidAmount,
 		OnlinePaidAmount:        o.OnlinePaidAmount,
@@ -145,11 +155,14 @@ type OrderItemResp struct {
 	SKUSnapshot              models.JSON        `json:"sku_snapshot"`
 	Tags                     models.StringArray `json:"tags"`
 	Quantity                 int                `json:"quantity"`
+	OriginalUnitPrice        models.Money       `json:"original_unit_price"`
 	UnitPrice                models.Money       `json:"unit_price"`
+	OriginalTotalPrice       models.Money       `json:"original_total_price"`
 	TotalPrice               models.Money       `json:"total_price"`
 	CouponDiscountAmount     models.Money       `json:"coupon_discount_amount"`
 	MemberDiscountAmount     models.Money       `json:"member_discount_amount"`
 	PromotionDiscountAmount  models.Money       `json:"promotion_discount_amount"`
+	WholesaleDiscountAmount  models.Money       `json:"wholesale_discount_amount"`
 	FulfillmentType          string             `json:"fulfillment_type"`
 	ManualFormSchemaSnapshot models.JSON        `json:"manual_form_schema_snapshot"`
 	ManualFormSubmission     models.JSON        `json:"manual_form_submission"`
@@ -169,11 +182,14 @@ func newOrderItemResp(item *models.OrderItem) OrderItemResp {
 		SKUSnapshot:              item.SKUSnapshotJSON,
 		Tags:                     item.Tags,
 		Quantity:                 item.Quantity,
+		OriginalUnitPrice:        item.OriginalUnitPrice,
 		UnitPrice:                item.UnitPrice,
+		OriginalTotalPrice:       item.OriginalTotalPrice,
 		TotalPrice:               item.TotalPrice,
 		CouponDiscountAmount:     item.CouponDiscount,
 		MemberDiscountAmount:     item.MemberDiscount,
 		PromotionDiscountAmount:  item.PromotionDiscount,
+		WholesaleDiscountAmount:  item.WholesaleDiscount,
 		FulfillmentType:          ft,
 		ManualFormSchemaSnapshot: item.ManualFormSchemaSnapshotJSON,
 		ManualFormSubmission:     item.ManualFormSubmissionJSON,

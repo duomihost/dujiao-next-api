@@ -88,8 +88,87 @@ func (s *UserAuthService) LoginWithTelegramMiniApp(input LoginWithTelegramMiniAp
 	return s.loginWithVerifiedTelegram(verified)
 }
 
+// StartTelegramOIDCInput 启动 Telegram OIDC 流程输入
+type StartTelegramOIDCInput struct {
+	Intent  string // "login" | "bind"
+	UserID  uint
+	Context context.Context
+}
+
+// LoginWithTelegramOIDCInput Telegram OIDC 登录输入
+type LoginWithTelegramOIDCInput struct {
+	Code    string
+	State   string
+	Context context.Context
+}
+
+// BindTelegramOIDCInput Telegram OIDC 绑定输入
+type BindTelegramOIDCInput struct {
+	UserID  uint
+	Code    string
+	State   string
+	Context context.Context
+}
+
+// StartTelegramOIDC 生成 Telegram OIDC 授权 URL
+func (s *UserAuthService) StartTelegramOIDC(input StartTelegramOIDCInput) (string, error) {
+	if s.telegramAuthService == nil {
+		return "", ErrTelegramAuthConfigInvalid
+	}
+	ctx := input.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	intent := input.Intent
+	if intent != telegramOIDCIntentLogin && intent != telegramOIDCIntentBind {
+		return "", ErrTelegramAuthPayloadInvalid
+	}
+	return s.telegramAuthService.StartOIDCLogin(ctx, intent, input.UserID)
+}
+
+// LoginWithTelegramOIDC 通过 Telegram OIDC 回调登录
+func (s *UserAuthService) LoginWithTelegramOIDC(input LoginWithTelegramOIDCInput) (*UserLoginResult, error) {
+	if s.telegramAuthService == nil || s.userOAuthIdentityRepo == nil {
+		return nil, ErrTelegramAuthConfigInvalid
+	}
+	ctx := input.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	verified, intent, _, err := s.telegramAuthService.CompleteOIDCLogin(ctx, input.Code, input.State)
+	if err != nil {
+		return nil, err
+	}
+	if intent != telegramOIDCIntentLogin {
+		return nil, ErrTelegramAuthPayloadInvalid
+	}
+	return s.loginWithVerifiedTelegram(verified)
+}
+
+// BindTelegramOIDC 通过 Telegram OIDC 回调绑定当前用户
+func (s *UserAuthService) BindTelegramOIDC(input BindTelegramOIDCInput) (*models.UserOAuthIdentity, error) {
+	if input.UserID == 0 {
+		return nil, ErrNotFound
+	}
+	if s.telegramAuthService == nil || s.userOAuthIdentityRepo == nil {
+		return nil, ErrTelegramAuthConfigInvalid
+	}
+	ctx := input.Context
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	verified, intent, userID, err := s.telegramAuthService.CompleteOIDCLogin(ctx, input.Code, input.State)
+	if err != nil {
+		return nil, err
+	}
+	if intent != telegramOIDCIntentBind || userID != input.UserID {
+		return nil, ErrTelegramAuthPayloadInvalid
+	}
+	return s.bindVerifiedTelegram(input.UserID, verified)
+}
+
 func (s *UserAuthService) loginWithVerifiedTelegram(verified *TelegramIdentityVerified) (*UserLoginResult, error) {
-	identity, err := s.userOAuthIdentityRepo.GetByProviderUserID(verified.Provider, verified.ProviderUserID)
+	identity, err := s.getTelegramIdentityByVerifiedID(verified)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +179,11 @@ func (s *UserAuthService) loginWithVerifiedTelegram(verified *TelegramIdentityVe
 		if err != nil {
 			return nil, err
 		}
-		identityChanged := applyTelegramIdentity(verified, identity)
+		identityChanged, err := s.canonicalizeTelegramProviderUserID(verified, identity)
+		if err != nil {
+			return nil, err
+		}
+		identityChanged = applyTelegramIdentity(verified, identity) || identityChanged
 		if identityChanged {
 			identity.UpdatedAt = time.Now()
 			if err := s.userOAuthIdentityRepo.Update(identity); err != nil {
@@ -216,7 +299,7 @@ func (s *UserAuthService) bindVerifiedTelegram(userID uint, verified *TelegramId
 		return nil, err
 	}
 
-	occupied, err := s.userOAuthIdentityRepo.GetByProviderUserID(verified.Provider, verified.ProviderUserID)
+	occupied, err := s.getTelegramIdentityByVerifiedID(verified)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +311,7 @@ func (s *UserAuthService) bindVerifiedTelegram(userID uint, verified *TelegramId
 	if err != nil {
 		return nil, err
 	}
-	if current != nil && current.ProviderUserID != verified.ProviderUserID {
+	if current != nil && !telegramProviderUserIDMatchesVerified(current.ProviderUserID, verified) {
 		return nil, ErrUserOAuthAlreadyBound
 	}
 	if current == nil {
@@ -248,7 +331,11 @@ func (s *UserAuthService) bindVerifiedTelegram(userID uint, verified *TelegramId
 		return current, nil
 	}
 
-	if applyTelegramIdentity(verified, current) {
+	identityChanged, err := s.canonicalizeTelegramProviderUserID(verified, current)
+	if err != nil {
+		return nil, err
+	}
+	if applyTelegramIdentity(verified, current) || identityChanged {
 		current.UpdatedAt = time.Now()
 		if err := s.userOAuthIdentityRepo.Update(current); err != nil {
 			return nil, err
@@ -580,8 +667,67 @@ func (s *UserAuthService) findOrCreateTelegramUser(verified *TelegramIdentityVer
 	// 分配默认会员等级
 	if s.memberLevelSvc != nil {
 		_ = s.memberLevelSvc.AssignDefaultLevel(user.ID)
+		// 同步内存对象的等级，避免调用方后续 Update(Save) 用零值覆盖数据库
+		if refreshed, err := s.userRepo.GetByID(user.ID); err == nil && refreshed != nil {
+			user.MemberLevelID = refreshed.MemberLevelID
+		}
 	}
 	return user, nil
+}
+
+// getTelegramIdentityByVerifiedID 按 Telegram 数字 ID 查询绑定，未命中时兼容历史 OIDC subject 绑定。
+func (s *UserAuthService) getTelegramIdentityByVerifiedID(verified *TelegramIdentityVerified) (*models.UserOAuthIdentity, error) {
+	if verified == nil || s.userOAuthIdentityRepo == nil {
+		return nil, ErrTelegramAuthConfigInvalid
+	}
+	identity, err := s.userOAuthIdentityRepo.GetByProviderUserID(verified.Provider, verified.ProviderUserID)
+	if err != nil || identity != nil {
+		return identity, err
+	}
+	for _, alias := range verified.ProviderUserIDAliases {
+		alias = strings.TrimSpace(alias)
+		if alias == "" || alias == verified.ProviderUserID {
+			continue
+		}
+		identity, err = s.userOAuthIdentityRepo.GetByProviderUserID(verified.Provider, alias)
+		if err != nil || identity != nil {
+			return identity, err
+		}
+	}
+	return nil, nil
+}
+
+// canonicalizeTelegramProviderUserID 将历史 OIDC subject 绑定迁移为 Telegram 数字用户 ID。
+func (s *UserAuthService) canonicalizeTelegramProviderUserID(verified *TelegramIdentityVerified, identity *models.UserOAuthIdentity) (bool, error) {
+	if verified == nil || identity == nil || identity.ProviderUserID == verified.ProviderUserID {
+		return false, nil
+	}
+	occupied, err := s.userOAuthIdentityRepo.GetByProviderUserID(verified.Provider, verified.ProviderUserID)
+	if err != nil {
+		return false, err
+	}
+	if occupied != nil && occupied.ID != identity.ID {
+		return false, ErrUserOAuthIdentityExists
+	}
+	identity.ProviderUserID = verified.ProviderUserID
+	return true, nil
+}
+
+// telegramProviderUserIDMatchesVerified 判断绑定 ID 是否匹配当前 Telegram 身份或其历史别名。
+func telegramProviderUserIDMatchesVerified(providerUserID string, verified *TelegramIdentityVerified) bool {
+	providerUserID = strings.TrimSpace(providerUserID)
+	if verified == nil || providerUserID == "" {
+		return false
+	}
+	if providerUserID == verified.ProviderUserID {
+		return true
+	}
+	for _, alias := range verified.ProviderUserIDAliases {
+		if providerUserID == strings.TrimSpace(alias) {
+			return true
+		}
+	}
+	return false
 }
 
 func applyTelegramIdentity(verified *TelegramIdentityVerified, identity *models.UserOAuthIdentity) bool {

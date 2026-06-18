@@ -8,6 +8,7 @@ import (
 	"github.com/dujiao-next/internal/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // CardSecretListFilter 卡密列表筛选条件
@@ -38,6 +39,14 @@ type CardSecretRepository interface {
 	ListIDsByBatchID(batchID uint) ([]uint, error)
 	CountByBatchIDs(batchIDs []uint) ([]CardSecretBatchStatusCount, error)
 	ListByOrderAndStatus(orderID uint, status string) ([]models.CardSecret, error)
+	// ListAvailableByProduct 在事务中按 product_id + (可选)sku_id + status=available 列出
+	// 最多 limit 条卡密,按 id 升序。skuID=0 表示不限制 SKU。
+	ListAvailableByProduct(productID, skuID uint, limit int) ([]models.CardSecret, error)
+	// ListAvailableByProductForUpdate 同 ListAvailableByProduct,但加 SELECT ... FOR UPDATE 行锁,
+	// 用于卡密扣库存事务避免并发出库重复。
+	ListAvailableByProductForUpdate(productID, skuID uint, limit int) ([]models.CardSecret, error)
+	// ListAvailableByProductBatchForUpdate 按商品/SKU/批次锁定可用卡密。
+	ListAvailableByProductBatchForUpdate(productID, skuID, batchID uint, limit int) ([]models.CardSecret, error)
 	GetByID(id uint) (*models.CardSecret, error)
 	Update(secret *models.CardSecret) error
 	BatchUpdateStatus(ids []uint, status string, updatedAt time.Time) (int64, error)
@@ -198,6 +207,60 @@ func (r *GormCardSecretRepository) ListByOrderAndStatus(orderID uint, status str
 		return nil, err
 	}
 	return items, nil
+}
+
+// ListAvailableByProduct 在事务中按 product_id + (可选)sku_id + status=available 列出
+// 最多 limit 条卡密,按 id 升序。
+func (r *GormCardSecretRepository) ListAvailableByProduct(productID, skuID uint, limit int) ([]models.CardSecret, error) {
+	if productID == 0 || limit <= 0 {
+		return nil, nil
+	}
+	query := r.db.Where("product_id = ? AND status = ?", productID, models.CardSecretStatusAvailable)
+	if skuID > 0 {
+		query = query.Where("sku_id = ?", skuID)
+	}
+	var rows []models.CardSecret
+	if err := query.Order("id asc").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// ListAvailableByProductForUpdate 加 FOR UPDATE 行锁的版本(用于事务内扣库存)。
+func (r *GormCardSecretRepository) ListAvailableByProductForUpdate(productID, skuID uint, limit int) ([]models.CardSecret, error) {
+	if productID == 0 || limit <= 0 {
+		return nil, nil
+	}
+	query := r.db.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("product_id = ? AND status = ?", productID, models.CardSecretStatusAvailable)
+	if skuID > 0 {
+		query = query.Where("sku_id = ?", skuID)
+	}
+	var rows []models.CardSecret
+	if err := query.Order("id asc").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// ListAvailableByProductBatchForUpdate 按商品/SKU/批次锁定可用卡密。
+func (r *GormCardSecretRepository) ListAvailableByProductBatchForUpdate(productID, skuID, batchID uint, limit int) ([]models.CardSecret, error) {
+	if productID == 0 || limit <= 0 {
+		return nil, nil
+	}
+	query := r.db.Clauses(clause.Locking{Strength: "UPDATE"}).
+		Where("product_id = ? AND status = ?", productID, models.CardSecretStatusAvailable)
+	if skuID > 0 {
+		query = query.Where("sku_id = ?", skuID)
+	}
+	if batchID > 0 {
+		query = query.Where("batch_id = ?", batchID)
+	}
+	var rows []models.CardSecret
+	if err := query.Order("id asc").Limit(limit).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // GetByID 根据 ID 获取卡密

@@ -1,14 +1,12 @@
 package service
 
 import (
-	"errors"
 	"time"
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/models"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // ExpireWalletRechargePayment 将未支付的钱包充值单标记为过期（幂等）。
@@ -22,13 +20,14 @@ func (s *PaymentService) ExpireWalletRechargePayment(paymentID uint) (*models.Pa
 
 	var output *models.Payment
 	err := s.paymentRepo.Transaction(func(tx *gorm.DB) error {
-		var payment models.Payment
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&payment, paymentID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrPaymentNotFound
-			}
+		locked, err := s.paymentRepo.WithTx(tx).GetByIDForUpdate(paymentID)
+		if err != nil {
 			return ErrPaymentUpdateFailed
 		}
+		if locked == nil {
+			return ErrPaymentNotFound
+		}
+		payment := *locked
 		// 仅处理钱包充值支付单，普通订单支付由订单超时任务处理。
 		if payment.OrderID != 0 {
 			output = &payment

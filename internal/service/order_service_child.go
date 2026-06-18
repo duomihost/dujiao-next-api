@@ -94,6 +94,17 @@ func (s *OrderService) cancelOrderWithChildren(order *models.Order, rollbackCoup
 				return err
 			}
 		}
+		if s.paymentRepo != nil {
+			orderIDs := []uint{order.ID}
+			for _, child := range order.Children {
+				if child.ID > 0 {
+					orderIDs = append(orderIDs, child.ID)
+				}
+			}
+			if _, err := s.paymentRepo.WithTx(tx).ExpirePendingByOrderIDs(orderIDs, now); err != nil {
+				return err
+			}
+		}
 		return nil
 	})
 	if err != nil {
@@ -201,6 +212,11 @@ func (s *OrderService) UpdateOrderStatus(orderID uint, targetStatus string) (*mo
 				}
 				for _, child := range order.Children {
 					if err := s.updateOrderToPaidInTx(tx, child.ID, child.Items, now); err != nil {
+						return err
+					}
+				}
+				if s.resellerAccountingSvc != nil {
+					if err := s.resellerAccountingSvc.PostOrderProfitTx(tx, order, nil); err != nil {
 						return err
 					}
 				}
@@ -498,6 +514,17 @@ func (s *OrderService) cancelSingleOrderInTx(tx *gorm.DB, order *models.Order, t
 	}
 	if s.walletService != nil {
 		if _, err := s.walletService.ReleaseOrderBalance(tx, order, constants.WalletTxnTypeOrderRefund, "订单取消退回余额"); err != nil {
+			return err
+		}
+	}
+	if target == constants.OrderStatusCanceled && s.paymentRepo != nil {
+		expiredAt := time.Now()
+		if v, ok := updates["canceled_at"]; ok {
+			if t, ok := v.(time.Time); ok {
+				expiredAt = t
+			}
+		}
+		if _, err := s.paymentRepo.WithTx(tx).ExpirePendingByOrderIDs([]uint{order.ID}, expiredAt); err != nil {
 			return err
 		}
 	}

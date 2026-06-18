@@ -2,17 +2,14 @@ package public
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"strings"
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/http/handlers/shared"
-	"github.com/dujiao-next/internal/models"
-	"github.com/dujiao-next/internal/payment/tokenpay"
-	"github.com/dujiao-next/internal/service"
 
 	"github.com/gin-gonic/gin"
-	"github.com/shopspring/decimal"
 )
 
 func (h *Handler) HandleTokenPayCallback(c *gin.Context) bool {
@@ -24,32 +21,38 @@ func (h *Handler) HandleTokenPayCallback(c *gin.Context) bool {
 	}
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
 
-	data, err := tokenpay.ParseCallback(body)
-	if err != nil {
+	// 轻量级特征检测：Signature + OutOrderId + Id（TokenOrderId）必须同时存在
+	var probe struct {
+		Signature    string `json:"Signature"`
+		OutOrderID   string `json:"OutOrderId"`
+		TokenOrderID string `json:"Id"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
 		log.Debugw("tokenpay_callback_parse_failed", "error", err)
 		return false
 	}
-	if strings.TrimSpace(data.Signature) == "" || strings.TrimSpace(data.OutOrderID) == "" || strings.TrimSpace(data.TokenOrderID) == "" {
+	if strings.TrimSpace(probe.Signature) == "" || strings.TrimSpace(probe.OutOrderID) == "" || strings.TrimSpace(probe.TokenOrderID) == "" {
 		log.Debugw("tokenpay_callback_not_matched")
 		return false
 	}
 
 	log.Infow("tokenpay_callback_received",
-		"out_order_id", data.OutOrderID,
-		"token_order_id", data.TokenOrderID,
-		"status", data.Status,
+		"out_order_id", probe.OutOrderID,
+		"token_order_id", probe.TokenOrderID,
 		"raw_body", callbackRawBodyForLog(body),
 	)
 
-	payment, err := h.PaymentRepo.GetByGatewayOrderNo(data.OutOrderID)
+	payment, err := h.PaymentRepo.GetByGatewayOrderNo(probe.OutOrderID)
 	if err != nil || payment == nil {
-		payment, err = h.PaymentRepo.GetLatestByProviderRef(data.TokenOrderID)
+		payment, err = h.PaymentRepo.GetLatestByProviderRef(probe.TokenOrderID)
 		if err != nil || payment == nil {
-			log.Warnw("tokenpay_callback_payment_not_found", "out_order_id", data.OutOrderID, "token_order_id", data.TokenOrderID, "error", err)
+			log.Warnw("tokenpay_callback_payment_not_found", "out_order_id", probe.OutOrderID, "token_order_id", probe.TokenOrderID, "error", err)
 			c.String(200, constants.TokenPayCallbackFail)
 			return true
 		}
 	}
+
+	log.Debugw("tokenpay_callback_payment_found", "payment_id", payment.ID, "channel_id", payment.ChannelID)
 
 	channel, err := h.PaymentChannelRepo.GetByID(payment.ChannelID)
 	if err != nil || channel == nil {
@@ -63,57 +66,14 @@ func (h *Handler) HandleTokenPayCallback(c *gin.Context) bool {
 		return true
 	}
 
-	cfg, err := tokenpay.ParseConfig(channel.ConfigJSON)
+	updated, err := h.PaymentService.HandleSyncCallback(channel, nil, body)
 	if err != nil {
-		log.Warnw("tokenpay_callback_config_parse_failed", "error", err)
-		c.String(200, constants.TokenPayCallbackFail)
-		return true
-	}
-	if strings.TrimSpace(cfg.Currency) == "" {
-		cfg.Currency = tokenpay.DefaultCurrency
-	}
-	if err := tokenpay.ValidateConfig(cfg); err != nil {
-		log.Warnw("tokenpay_callback_config_invalid", "error", err)
-		c.String(200, constants.TokenPayCallbackFail)
-		return true
-	}
-	if err := tokenpay.VerifyCallback(data, cfg.NotifySecret); err != nil {
-		log.Warnw("tokenpay_callback_signature_invalid", "error", err)
+		log.Errorw("tokenpay_callback_handle_failed", "payment_id", payment.ID, "error", err)
 		c.String(200, constants.TokenPayCallbackFail)
 		return true
 	}
 
-	amount := models.Money{}
-	if parsed := tokenpay.ParseAmount(data.ActualAmount); parsed != "" {
-		if parsedAmount, parseErr := decimal.NewFromString(parsed); parseErr == nil {
-			amount = models.NewMoneyFromDecimal(parsedAmount)
-		}
-	}
-	callbackInput := service.PaymentCallbackInput{
-		PaymentID:   payment.ID,
-		OrderNo:     strings.TrimSpace(data.OutOrderID),
-		ChannelID:   channel.ID,
-		Status:      tokenpay.ToPaymentStatus(data.Status),
-		ProviderRef: strings.TrimSpace(data.TokenOrderID),
-		Amount:      amount,
-		Currency:    strings.TrimSpace(data.BaseCurrency),
-		PaidAt:      tokenpay.ParsePaidAt(data.PayTime),
-		Payload:     models.JSON(data.Raw),
-	}
-
-	updated, err := h.PaymentService.HandleCallback(callbackInput)
-	if err != nil {
-		log.Warnw("tokenpay_callback_handle_failed", "payment_id", payment.ID, "error", err)
-		c.String(200, constants.TokenPayCallbackFail)
-		return true
-	}
-
-	log.Infow("tokenpay_callback_processed",
-		"payment_id", payment.ID,
-		"order_no", callbackInput.OrderNo,
-		"provider_ref", callbackInput.ProviderRef,
-		"status", updated.Status,
-	)
+	log.Infow("tokenpay_callback_processed", "payment_id", payment.ID, "status", updated.Status)
 	c.String(200, constants.TokenPayCallbackSuccess)
 	return true
 }

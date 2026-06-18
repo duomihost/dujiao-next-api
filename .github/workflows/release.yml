@@ -34,6 +34,11 @@ jobs:
           ref: ${{ github.ref_name }}
           path: user-src
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.3
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -42,14 +47,14 @@ jobs:
       - name: Build admin (fullstack mode)
         working-directory: admin-src
         run: |
-          npm ci
-          npm run build:fullstack
+          pnpm install --frozen-lockfile
+          pnpm run build:fullstack
 
       - name: Build user
         working-directory: user-src
         run: |
-          npm ci
-          npm run build
+          pnpm install --frozen-lockfile
+          pnpm run build
 
       - name: Embed frontend assets into api
         run: |

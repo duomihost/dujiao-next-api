@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -116,16 +117,36 @@ func Del(ctx context.Context, key string) error {
 	return redisClient.Del(ctx, buildKey(key)).Err()
 }
 
+// DelPattern 删除匹配 pattern 的缓存键。pattern 会自动追加项目 Redis 前缀。
+func DelPattern(ctx context.Context, pattern string) error {
+	if !Enabled() {
+		return nil
+	}
+	iter := redisClient.Scan(ctx, 0, buildKey(pattern), 100).Iterator()
+	for iter.Next(ctx) {
+		if err := redisClient.Del(ctx, iter.Val()).Err(); err != nil {
+			return err
+		}
+	}
+	return iter.Err()
+}
+
 // SetNX 原子写入（键不存在时写入并设置过期）
 func SetNX(ctx context.Context, key string, value interface{}, ttl time.Duration) (bool, error) {
 	if !Enabled() {
 		return true, nil
 	}
-	result, err := redisClient.SetNX(ctx, buildKey(key), value, ttl).Result()
+	_, err := redisClient.SetArgs(ctx, buildKey(key), value, redis.SetArgs{
+		Mode: "NX",
+		TTL:  ttl,
+	}).Result()
+	if errors.Is(err, redis.Nil) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	return result, nil
+	return true, nil
 }
 
 func buildKey(key string) string {

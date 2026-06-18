@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/json"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -46,6 +47,12 @@ type SettingService struct {
 type SiteBrand struct {
 	SiteName string
 	SiteURL  string
+}
+
+// RegistrationEmailDomainPolicy 描述注册邮箱域名白名单策略。
+type RegistrationEmailDomainPolicy struct {
+	Enabled        bool
+	AllowedDomains []string
 }
 
 // NewSettingService 创建设置服务。
@@ -296,6 +303,52 @@ func (s *SettingService) GetEmailVerificationEnabled(defaultValue bool) (bool, e
 		return defaultValue, nil
 	}
 	return parseSettingBool(raw), nil
+}
+
+// GetRegistrationEmailDomainPolicy 获取注册邮箱域名白名单策略。
+func (s *SettingService) GetRegistrationEmailDomainPolicy() (RegistrationEmailDomainPolicy, error) {
+	policy := RegistrationEmailDomainPolicy{Enabled: false, AllowedDomains: []string{}}
+	if s == nil {
+		return policy, nil
+	}
+	value, err := s.GetByKey(constants.SettingKeyRegistrationConfig)
+	if err != nil {
+		return policy, err
+	}
+	if value == nil {
+		return policy, nil
+	}
+	if raw, ok := value[constants.SettingFieldEmailDomainAllowlistEnabled]; ok {
+		policy.Enabled = parseSettingBool(raw)
+	}
+	policy.AllowedDomains = normalizeRegistrationEmailDomains(value[constants.SettingFieldAllowedEmailDomains])
+	return policy, nil
+}
+
+// CheckRegistrationEmailDomainAllowed 校验邮箱格式与注册域名白名单策略。
+func CheckRegistrationEmailDomainAllowed(email string, policy RegistrationEmailDomainPolicy) error {
+	normalized, err := normalizeEmail(email)
+	if err != nil {
+		return err
+	}
+	parsed, err := mail.ParseAddress(normalized)
+	if err != nil || parsed.Address != normalized {
+		return ErrInvalidEmail
+	}
+	if !policy.Enabled {
+		return nil
+	}
+	at := strings.LastIndex(parsed.Address, "@")
+	if at < 0 || at == len(parsed.Address)-1 {
+		return ErrInvalidEmail
+	}
+	domain := strings.ToLower(strings.TrimSpace(parsed.Address[at+1:]))
+	for _, allowed := range normalizeRegistrationEmailDomains(policy.AllowedDomains) {
+		if domain == allowed {
+			return nil
+		}
+	}
+	return ErrEmailDomainNotAllowed
 }
 
 // GetSiteCurrency 获取站点币种配置

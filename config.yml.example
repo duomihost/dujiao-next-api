@@ -43,6 +43,11 @@ telegram_auth:
   enabled: false
   bot_username: ""  # Telegram Bot 用户名（不含 @）
   bot_token: ""     # Telegram Bot Token（敏感）
+  # 新版 OIDC 登录（可选）：在 @BotFather → Bot Settings → Web Login 获取 Client Secret，
+  # 并把本商城域名 origin 与下面的回调地址都加入 Allowed URLs。
+  # 同时填写 client_secret + oidc_redirect_uri 后自动切换为新版 OIDC 登录；否则沿用旧版 Login Widget。
+  client_secret: ""        # OIDC Client Secret（敏感）
+  oidc_redirect_uri: ""    # 形如 https://你的商城域名/auth/telegram/callback
   mini_app_url: ""  # Telegram Mini App 页面地址（需与 BotFather Web App URL 保持一致）
   login_expire_seconds: 300
   replay_ttl_seconds: 300
@@ -137,6 +142,23 @@ email:
 order:
   payment_expire_minutes: 15
   max_refund_days: 30
+
+reseller:
+  enabled: false
+  # 主站域名列表。启用分销模式后，请把正式主站域名写入这里。
+  # 命中 main_hosts 的请求按主站上下文处理；未命中则尝试解析 reseller_domains。
+  main_hosts:
+    - localhost
+    - 127.0.0.1
+    - "::1"
+  # 只有反向代理可信并正确传递 Host 时才开启。
+  # false 时使用原始 Host；true 时优先使用 X-Forwarded-Host。
+  trusted_forwarded_host: false
+  # 系统分配二级域名的基础域名。审核通过后会生成 r{reseller_id}.{subdomain_base}。
+  # 生产启用前请配置为已经做好 wildcard DNS/TLS 的域名，例如 shop.example.com。
+  subdomain_base: ""
+  # 是否允许普通用户在个人中心自助提交分销商申请。
+  self_apply_enabled: true
 
 # Web 路由配置（仅在 fullstack 二进制模式下生效；普通 Docker 镜像部署忽略此段）
 web:

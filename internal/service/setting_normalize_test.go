@@ -1,6 +1,8 @@
 package service
 
 import (
+	"errors"
+	"reflect"
 	"testing"
 
 	"github.com/dujiao-next/internal/config"
@@ -28,6 +30,39 @@ func TestUpdateOrderSettingNormalized(t *testing.T) {
 	}
 	if _, ok := result["extra"]; ok {
 		t.Fatalf("unexpected extra field kept in normalized order config: %v", result["extra"])
+	}
+}
+
+func TestUpdateCallbackRoutesSettingIncludesDujiaoPayWebhook(t *testing.T) {
+	repo := newMockSettingRepo()
+	svc := NewSettingService(repo)
+
+	result, err := svc.Update(constants.SettingKeyCallbackRoutesConfig, map[string]interface{}{
+		constants.SettingFieldPaymentCallback:  " /api/custom/payment ",
+		constants.SettingFieldDujiaoPayWebhook: " /api/custom/dujiaopay?ignored=1 ",
+		constants.SettingFieldPaypalWebhook:    " /api/custom/paypal/ ",
+		constants.SettingFieldStripeWebhook:    " /api/custom/paypal ",
+		constants.SettingFieldUpstreamCallback: " /api/v1/upstream/custom ",
+		"unexpected_field_should_be_dropped":   "/api/custom/extra",
+	})
+	if err != nil {
+		t.Fatalf("update callback routes failed: %v", err)
+	}
+
+	if result[constants.SettingFieldPaymentCallback] != "/api/custom/payment" {
+		t.Fatalf("payment_callback = %v", result[constants.SettingFieldPaymentCallback])
+	}
+	if result[constants.SettingFieldDujiaoPayWebhook] != "/api/custom/dujiaopay" {
+		t.Fatalf("dujiaopay_webhook = %v", result[constants.SettingFieldDujiaoPayWebhook])
+	}
+	if result[constants.SettingFieldPaypalWebhook] != "/api/custom/paypal" {
+		t.Fatalf("paypal_webhook = %v", result[constants.SettingFieldPaypalWebhook])
+	}
+	if result[constants.SettingFieldStripeWebhook] != "" {
+		t.Fatalf("duplicate stripe_webhook should be cleared, got %v", result[constants.SettingFieldStripeWebhook])
+	}
+	if _, ok := result["unexpected_field_should_be_dropped"]; ok {
+		t.Fatalf("unexpected field kept in callback route setting")
 	}
 }
 
@@ -509,6 +544,90 @@ func TestGetOrderConfigFallsBackToConfigWhenMissing(t *testing.T) {
 	}
 	if cfg.MaxRefundDays != DefaultOrderConfig().MaxRefundDays {
 		t.Fatalf("unexpected default max_refund_days: %d", cfg.MaxRefundDays)
+	}
+}
+
+func TestRegistrationSettingNormalizesEmailDomainAllowlist(t *testing.T) {
+	repo := newMockSettingRepo()
+	svc := NewSettingService(repo)
+
+	result, err := svc.Update(constants.SettingKeyRegistrationConfig, map[string]interface{}{
+		constants.SettingFieldRegistrationEnabled:         true,
+		constants.SettingFieldEmailVerificationEnabled:    false,
+		constants.SettingFieldEmailDomainAllowlistEnabled: "true",
+		constants.SettingFieldAllowedEmailDomains:         []interface{}{" @QQ.COM ", "gmail.com", "qq.com", "bad-domain", "mail.163.com"},
+	})
+	if err != nil {
+		t.Fatalf("update registration config failed: %v", err)
+	}
+	if result[constants.SettingFieldRegistrationEnabled] != true {
+		t.Fatalf("registration_enabled should remain true")
+	}
+	if result[constants.SettingFieldEmailVerificationEnabled] != false {
+		t.Fatalf("email_verification_enabled should remain false")
+	}
+	if result[constants.SettingFieldEmailDomainAllowlistEnabled] != true {
+		t.Fatalf("email_domain_allowlist_enabled should be true")
+	}
+	domains, ok := result[constants.SettingFieldAllowedEmailDomains].([]string)
+	if !ok {
+		t.Fatalf("allowed_email_domains type = %T", result[constants.SettingFieldAllowedEmailDomains])
+	}
+	want := []string{"qq.com", "gmail.com", "mail.163.com"}
+	if !reflect.DeepEqual(domains, want) {
+		t.Fatalf("allowed domains = %#v, want %#v", domains, want)
+	}
+}
+
+func TestRegistrationEmailDomainPolicyAndChecker(t *testing.T) {
+	repo := newMockSettingRepo()
+	svc := NewSettingService(repo)
+	if _, err := svc.Update(constants.SettingKeyRegistrationConfig, map[string]interface{}{
+		constants.SettingFieldEmailDomainAllowlistEnabled: true,
+		constants.SettingFieldAllowedEmailDomains:         "QQ.COM\ngmail.com, 163.com",
+	}); err != nil {
+		t.Fatalf("update registration config failed: %v", err)
+	}
+
+	policy, err := svc.GetRegistrationEmailDomainPolicy()
+	if err != nil {
+		t.Fatalf("get policy failed: %v", err)
+	}
+	if !policy.Enabled {
+		t.Fatalf("policy should be enabled")
+	}
+	if !reflect.DeepEqual(policy.AllowedDomains, []string{"qq.com", "gmail.com", "163.com"}) {
+		t.Fatalf("domains = %#v", policy.AllowedDomains)
+	}
+	if err := CheckRegistrationEmailDomainAllowed("buyer@qq.com", policy); err != nil {
+		t.Fatalf("qq.com should be allowed: %v", err)
+	}
+	if err := CheckRegistrationEmailDomainAllowed("buyer@mail.qq.com", policy); !errors.Is(err, ErrEmailDomainNotAllowed) {
+		t.Fatalf("mail.qq.com should be rejected, got %v", err)
+	}
+	if err := CheckRegistrationEmailDomainAllowed("buyer@evilqq.com", policy); !errors.Is(err, ErrEmailDomainNotAllowed) {
+		t.Fatalf("evilqq.com should be rejected, got %v", err)
+	}
+	if err := CheckRegistrationEmailDomainAllowed("not-an-email", policy); !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("invalid email should be rejected, got %v", err)
+	}
+	if err := CheckRegistrationEmailDomainAllowed("Buyer <buyer@qq.com>", policy); !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("display-name email should be rejected as invalid, got %v", err)
+	}
+	if err := CheckRegistrationEmailDomainAllowed("buyer@qq.com", RegistrationEmailDomainPolicy{Enabled: false}); err != nil {
+		t.Fatalf("disabled policy should allow valid email: %v", err)
+	}
+	if err := CheckRegistrationEmailDomainAllowed("not-an-email", RegistrationEmailDomainPolicy{Enabled: false}); !errors.Is(err, ErrInvalidEmail) {
+		t.Fatalf("disabled policy should reject invalid email, got %v", err)
+	}
+	if err := CheckRegistrationEmailDomainAllowed("buyer@qq.com", RegistrationEmailDomainPolicy{Enabled: true}); !errors.Is(err, ErrEmailDomainNotAllowed) {
+		t.Fatalf("enabled policy with empty allowlist should reject valid email, got %v", err)
+	}
+	if err := CheckRegistrationEmailDomainAllowed("buyer@qq.com", RegistrationEmailDomainPolicy{
+		Enabled:        true,
+		AllowedDomains: []string{"QQ.COM"},
+	}); err != nil {
+		t.Fatalf("checker should normalize policy allowed domains defensively: %v", err)
 	}
 }
 

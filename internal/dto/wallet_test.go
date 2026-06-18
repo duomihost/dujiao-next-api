@@ -97,8 +97,8 @@ func TestWalletRechargePaymentPayloadOmitsSensitiveFields(t *testing.T) {
 	data, _ := json.Marshal(resp)
 	jsonStr := string(data)
 
-	// Recharge 敏感字段
-	sensitiveFields := []string{"user_id", "channel_id", "fee_rate"}
+	// Recharge 敏感字段（fee_rate 故意保留：用户充值页面需要展示费率给用户看）
+	sensitiveFields := []string{"user_id", "channel_id"}
 	for _, field := range sensitiveFields {
 		if strings.Contains(jsonStr, `"`+field+`"`) {
 			t.Errorf("sensitive field %q should not appear", field)

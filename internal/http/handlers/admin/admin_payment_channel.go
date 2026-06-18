@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 
 	"github.com/dujiao-next/internal/cache"
 	"github.com/dujiao-next/internal/http/handlers/shared"
@@ -92,7 +91,7 @@ func (h *Handler) CreatePaymentChannel(c *gin.Context) {
 		shared.RespondError(c, response.CodeInternal, "error.payment_channel_create_failed", err)
 		return
 	}
-	_ = cache.Del(c.Request.Context(), publicConfigCacheKey)
+	_ = cache.DelAllPublicConfig(c.Request.Context())
 
 	response.Success(c, channel)
 }
@@ -207,7 +206,7 @@ func (h *Handler) UpdatePaymentChannel(c *gin.Context) {
 		shared.RespondError(c, response.CodeInternal, "error.payment_channel_update_failed", err)
 		return
 	}
-	_ = cache.Del(c.Request.Context(), publicConfigCacheKey)
+	_ = cache.DelAllPublicConfig(c.Request.Context())
 
 	response.Success(c, channel)
 }
@@ -224,7 +223,7 @@ func (h *Handler) DeletePaymentChannel(c *gin.Context) {
 		shared.RespondError(c, response.CodeInternal, "error.payment_channel_delete_failed", err)
 		return
 	}
-	_ = cache.Del(c.Request.Context(), publicConfigCacheKey)
+	_ = cache.DelAllPublicConfig(c.Request.Context())
 
 	response.Success(c, gin.H{"deleted": true})
 }
@@ -253,21 +252,14 @@ func (h *Handler) GetPaymentChannel(c *gin.Context) {
 
 // GetPaymentChannels 获取支付渠道列表
 func (h *Handler) GetPaymentChannels(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	providerType := c.Query("provider_type")
 	channelType := c.Query("channel_type")
-	activeOnly := c.DefaultQuery("active_only", "")
-	activeOnlyBool := false
-	if activeOnly != "" {
-		parsed, err := strconv.ParseBool(activeOnly)
-		if err != nil {
-			shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-			return
-		}
-		activeOnlyBool = parsed
+	activeOnly, err := shared.ParseQueryBool(c, "active_only")
+	if err != nil {
+		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+		return
 	}
 
 	channels, total, err := h.PaymentService.ListChannels(repository.PaymentChannelListFilter{
@@ -275,7 +267,7 @@ func (h *Handler) GetPaymentChannels(c *gin.Context) {
 		PageSize:     pageSize,
 		ProviderType: providerType,
 		ChannelType:  channelType,
-		ActiveOnly:   activeOnlyBool,
+		ActiveOnly:   activeOnly,
 	})
 	if err != nil {
 		shared.RespondError(c, response.CodeInternal, "error.payment_channel_fetch_failed", err)

@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/http/response"
@@ -26,26 +25,16 @@ type CreatePromotionRequest struct {
 	IsActive   *bool   `json:"is_active"`
 }
 
-// CreatePromotion 创建活动价
-func (h *Handler) CreatePromotion(c *gin.Context) {
-	var req CreatePromotionRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		shared.RespondBindError(c, err)
-		return
-	}
-
+func buildCreatePromotionInputFromRequest(req CreatePromotionRequest) (service.CreatePromotionInput, error) {
 	startsAt, err := shared.ParseTimeNullable(req.StartsAt)
 	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
+		return service.CreatePromotionInput{}, err
 	}
 	endsAt, err := shared.ParseTimeNullable(req.EndsAt)
 	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
+		return service.CreatePromotionInput{}, err
 	}
-
-	promotion, err := h.PromotionAdminService.Create(service.CreatePromotionInput{
+	return service.CreatePromotionInput{
 		Name:       req.Name,
 		Type:       req.Type,
 		ScopeRefID: req.ScopeRefID,
@@ -54,7 +43,32 @@ func (h *Handler) CreatePromotion(c *gin.Context) {
 		StartsAt:   startsAt,
 		EndsAt:     endsAt,
 		IsActive:   req.IsActive,
-	})
+	}, nil
+}
+
+func buildUpdatePromotionInputFromRequest(req CreatePromotionRequest) (service.UpdatePromotionInput, error) {
+	input, err := buildCreatePromotionInputFromRequest(req)
+	if err != nil {
+		return service.UpdatePromotionInput{}, err
+	}
+	return service.UpdatePromotionInput(input), nil
+}
+
+// CreatePromotion 创建活动价
+func (h *Handler) CreatePromotion(c *gin.Context) {
+	var req CreatePromotionRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		shared.RespondBindError(c, err)
+		return
+	}
+
+	input, err := buildCreatePromotionInputFromRequest(req)
+	if err != nil {
+		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+		return
+	}
+
+	promotion, err := h.PromotionAdminService.Create(input)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrPromotionInvalid):
@@ -81,27 +95,13 @@ func (h *Handler) UpdatePromotion(c *gin.Context) {
 		return
 	}
 
-	startsAt, err := shared.ParseTimeNullable(req.StartsAt)
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
-	endsAt, err := shared.ParseTimeNullable(req.EndsAt)
+	input, err := buildUpdatePromotionInputFromRequest(req)
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
 	}
 
-	promotion, err := h.PromotionAdminService.Update(promotionID, service.UpdatePromotionInput{
-		Name:       req.Name,
-		Type:       req.Type,
-		ScopeRefID: req.ScopeRefID,
-		Value:      models.NewMoneyFromDecimal(decimal.NewFromFloat(req.Value)),
-		MinAmount:  models.NewMoneyFromDecimal(decimal.NewFromFloat(req.MinAmount)),
-		StartsAt:   startsAt,
-		EndsAt:     endsAt,
-		IsActive:   req.IsActive,
-	})
+	promotion, err := h.PromotionAdminService.Update(promotionID, input)
 	if err != nil {
 		switch {
 		case errors.Is(err, service.ErrPromotionNotFound):
@@ -142,9 +142,7 @@ func (h *Handler) DeletePromotion(c *gin.Context) {
 
 // GetAdminPromotions 获取活动价列表
 func (h *Handler) GetAdminPromotions(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	id, err := shared.ParseQueryUint(c.Query("id"), true)
 	if err != nil {
@@ -154,18 +152,15 @@ func (h *Handler) GetAdminPromotions(c *gin.Context) {
 
 	scopeRefID, _ := shared.ParseQueryUint(c.Query("scope_ref_id"), false)
 
-	var isActive *bool
-	if raw := c.Query("is_active"); raw != "" {
-		parsed, err := strconv.ParseBool(raw)
-		if err != nil {
-			shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-			return
-		}
-		isActive = &parsed
+	isActive, err := shared.ParseQueryBoolPtr(c, "is_active")
+	if err != nil {
+		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+		return
 	}
 
 	promotions, total, err := h.PromotionAdminService.List(repository.PromotionListFilter{
 		ID:         id,
+		Name:       c.Query("name"),
 		ScopeRefID: scopeRefID,
 		IsActive:   isActive,
 		Page:       page,

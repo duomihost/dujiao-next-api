@@ -39,47 +39,38 @@ func summarizeManualStockItems(items []models.OrderItem) manualStockSummary {
 }
 
 func releaseManualStockByItems(productRepo repository.ProductRepository, productSKURepo repository.ProductSKURepository, items []models.OrderItem) error {
-	summary := summarizeManualStockItems(items)
+	var skuOp func(uint, int) (int64, error)
 	if productSKURepo != nil {
-		for skuID, quantity := range summary.BySKU {
-			sku, err := productSKURepo.GetByID(skuID)
-			if err != nil {
-				return err
-			}
-			if sku == nil || sku.ManualStockTotal == constants.ManualStockUnlimited {
-				continue
-			}
-			if _, err := productSKURepo.ReleaseManualStock(skuID, quantity); err != nil {
-				return err
-			}
-		}
+		skuOp = productSKURepo.ReleaseManualStock
 	}
-
-	productSummary := summary.ByLegacyProduct
-	if productSKURepo == nil {
-		productSummary = summary.ByProductAll
+	var productOp func(uint, int) (int64, error)
+	if productRepo != nil {
+		productOp = productRepo.ReleaseManualStock
 	}
-	if productRepo == nil {
-		return nil
-	}
-	for productID, quantity := range productSummary {
-		product, err := productRepo.GetByID(strconv.FormatUint(uint64(productID), 10))
-		if err != nil {
-			return err
-		}
-		if product == nil || product.ManualStockTotal == constants.ManualStockUnlimited {
-			continue
-		}
-		if _, err := productRepo.ReleaseManualStock(productID, quantity); err != nil {
-			return err
-		}
-	}
-	return nil
+	return applyManualStockByItems(productRepo, productSKURepo, items, skuOp, productOp)
 }
 
 func consumeManualStockByItems(productRepo repository.ProductRepository, productSKURepo repository.ProductSKURepository, items []models.OrderItem) error {
-	summary := summarizeManualStockItems(items)
+	var skuOp func(uint, int) (int64, error)
 	if productSKURepo != nil {
+		skuOp = productSKURepo.ConsumeManualStock
+	}
+	var productOp func(uint, int) (int64, error)
+	if productRepo != nil {
+		productOp = productRepo.ConsumeManualStock
+	}
+	return applyManualStockByItems(productRepo, productSKURepo, items, skuOp, productOp)
+}
+
+func applyManualStockByItems(
+	productRepo repository.ProductRepository,
+	productSKURepo repository.ProductSKURepository,
+	items []models.OrderItem,
+	updateSKU func(uint, int) (int64, error),
+	updateProduct func(uint, int) (int64, error),
+) error {
+	summary := summarizeManualStockItems(items)
+	if productSKURepo != nil && updateSKU != nil {
 		for skuID, quantity := range summary.BySKU {
 			sku, err := productSKURepo.GetByID(skuID)
 			if err != nil {
@@ -88,7 +79,7 @@ func consumeManualStockByItems(productRepo repository.ProductRepository, product
 			if sku == nil || sku.ManualStockTotal == constants.ManualStockUnlimited {
 				continue
 			}
-			if _, err := productSKURepo.ConsumeManualStock(skuID, quantity); err != nil {
+			if _, err := updateSKU(skuID, quantity); err != nil {
 				return err
 			}
 		}
@@ -98,7 +89,7 @@ func consumeManualStockByItems(productRepo repository.ProductRepository, product
 	if productSKURepo == nil {
 		productSummary = summary.ByProductAll
 	}
-	if productRepo == nil {
+	if productRepo == nil || updateProduct == nil {
 		return nil
 	}
 	for productID, quantity := range productSummary {
@@ -109,7 +100,7 @@ func consumeManualStockByItems(productRepo repository.ProductRepository, product
 		if product == nil || product.ManualStockTotal == constants.ManualStockUnlimited {
 			continue
 		}
-		if _, err := productRepo.ConsumeManualStock(productID, quantity); err != nil {
+		if _, err := updateProduct(productID, quantity); err != nil {
 			return err
 		}
 	}

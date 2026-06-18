@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/http/response"
@@ -14,9 +13,7 @@ import (
 
 // GetProductMappings 获取商品映射列表
 func (h *Handler) GetProductMappings(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	connectionID, _ := shared.ParseQueryUint(c.Query("connection_id"), false)
 
@@ -69,10 +66,11 @@ func (h *Handler) GetProductMapping(c *gin.Context) {
 
 // ImportUpstreamProductRequest 导入上游商品请求
 type ImportUpstreamProductRequest struct {
-	ConnectionID      uint   `json:"connection_id" binding:"required"`
-	UpstreamProductID uint   `json:"upstream_product_id" binding:"required"`
-	CategoryID        uint   `json:"category_id"`
-	Slug              string `json:"slug"`
+	ConnectionID       uint   `json:"connection_id" binding:"required"`
+	UpstreamProductID  uint   `json:"upstream_product_id" binding:"required"`
+	CategoryID         uint   `json:"category_id"`
+	Slug               string `json:"slug"`
+	AutoCreateCategory bool   `json:"auto_create_category"`
 }
 
 // ImportUpstreamProduct 导入上游商品
@@ -83,11 +81,12 @@ func (h *Handler) ImportUpstreamProduct(c *gin.Context) {
 		return
 	}
 
-	mapping, err := h.ProductMappingService.ImportUpstreamProduct(
+	mapping, err := h.ProductMappingService.ImportUpstreamProductWithAutoCategory(
 		req.ConnectionID,
 		req.UpstreamProductID,
 		req.CategoryID,
 		req.Slug,
+		req.AutoCreateCategory,
 	)
 	if err != nil {
 		if errors.Is(err, service.ErrMappingAlreadyExists) {
@@ -122,6 +121,7 @@ type BatchImportUpstreamProductRequest struct {
 	ConnectionID       uint   `json:"connection_id" binding:"required"`
 	UpstreamProductIDs []uint `json:"upstream_product_ids" binding:"required,min=1"`
 	CategoryID         uint   `json:"category_id"`
+	AutoCreateCategory bool   `json:"auto_create_category"`
 }
 
 // BatchImportUpstreamProductResult 单个商品导入结果
@@ -139,26 +139,32 @@ func (h *Handler) BatchImportUpstreamProducts(c *gin.Context) {
 		return
 	}
 
-	results := make([]BatchImportUpstreamProductResult, len(req.UpstreamProductIDs))
-	successCount := 0
-
-	for i, upstreamProductID := range req.UpstreamProductIDs {
-		result := BatchImportUpstreamProductResult{
-			UpstreamProductID: upstreamProductID,
+	outcomes, err := h.ProductMappingService.BatchImportUpstreamProducts(
+		req.ConnectionID,
+		req.UpstreamProductIDs,
+		req.CategoryID,
+		req.AutoCreateCategory,
+	)
+	if err != nil {
+		if errors.Is(err, service.ErrConnectionNotFound) {
+			shared.RespondError(c, response.CodeNotFound, "error.connection_not_found", nil)
+			return
 		}
-		_, err := h.ProductMappingService.ImportUpstreamProduct(
-			req.ConnectionID,
-			upstreamProductID,
-			req.CategoryID,
-			"", // auto-generate slug
-		)
-		if err != nil {
-			result.Error = err.Error()
+		shared.RespondError(c, response.CodeInternal, "error.mapping_import_failed", err)
+		return
+	}
+
+	results := make([]BatchImportUpstreamProductResult, len(outcomes))
+	successCount := 0
+	for i, o := range outcomes {
+		item := BatchImportUpstreamProductResult{UpstreamProductID: o.UpstreamProductID}
+		if o.Err != nil {
+			item.Error = o.Err.Error()
 		} else {
-			result.Success = true
+			item.Success = true
 			successCount++
 		}
-		results[i] = result
+		results[i] = item
 	}
 
 	response.Success(c, gin.H{
@@ -312,9 +318,7 @@ func (h *Handler) ListUpstreamProducts(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "50"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePaginationWithKeys(c, "page", "page_size", 50)
 
 	result, err := h.ProductMappingService.ListUpstreamProducts(connectionID, page, pageSize)
 	if err != nil {

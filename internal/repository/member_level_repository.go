@@ -13,6 +13,7 @@ type MemberLevelRepository interface {
 	GetByID(id uint) (*models.MemberLevel, error)
 	GetBySlug(slug string) (*models.MemberLevel, error)
 	GetDefault() (*models.MemberLevel, error)
+	GetActiveBySortOrder(sortOrder int, excludeID uint) (*models.MemberLevel, error)
 	ListAllActive() ([]models.MemberLevel, error)
 	Create(level *models.MemberLevel) error
 	Update(level *models.MemberLevel) error
@@ -79,10 +80,25 @@ func (r *GormMemberLevelRepository) GetDefault() (*models.MemberLevel, error) {
 	return &level, nil
 }
 
+func (r *GormMemberLevelRepository) GetActiveBySortOrder(sortOrder int, excludeID uint) (*models.MemberLevel, error) {
+	var level models.MemberLevel
+	query := r.db.Where("is_active = ? AND sort_order = ?", true, sortOrder)
+	if excludeID > 0 {
+		query = query.Where("id != ?", excludeID)
+	}
+	if err := query.First(&level).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &level, nil
+}
+
 // ListAllActive 获取所有启用的等级，按 sort_order DESC
 func (r *GormMemberLevelRepository) ListAllActive() ([]models.MemberLevel, error) {
 	var levels []models.MemberLevel
-	if err := r.db.Where("is_active = ?", true).Order("sort_order desc").Find(&levels).Error; err != nil {
+	if err := r.db.Where("is_active = ?", true).Order("sort_order desc, id asc").Find(&levels).Error; err != nil {
 		return nil, err
 	}
 	return levels, nil

@@ -3,7 +3,6 @@ package channel
 import (
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -175,9 +174,7 @@ func (h *Handler) ListAffiliateCommissions(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 	status := strings.TrimSpace(c.Query("status"))
 
 	rows, total, err := h.AffiliateService.ListUserCommissions(userID, page, pageSize, status)
@@ -230,9 +227,7 @@ func (h *Handler) ListAffiliateWithdraws(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 	status := strings.TrimSpace(c.Query("status"))
 
 	rows, total, err := h.AffiliateService.ListUserWithdraws(userID, page, pageSize, status)

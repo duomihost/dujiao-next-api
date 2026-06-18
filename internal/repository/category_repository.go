@@ -11,15 +11,19 @@ import (
 // CategoryRepository 分类数据访问接口
 type CategoryRepository interface {
 	List() ([]models.Category, error)
+	ListActive() ([]models.Category, error)
 	GetByID(id string) (*models.Category, error)
 	Create(category *models.Category) error
 	Update(category *models.Category) error
+	UpdateActive(id string, active bool) error
 	Delete(id string) error
 	CountBySlug(slug string, excludeID *string) (int64, error)
 	CountChildren(categoryID string) (int64, error)
 	CountProducts(categoryID string) (int64, error)
 	CountActiveProducts(categoryID string) (int64, error)
 	GetBySlug(slug string) (*models.Category, error)
+	GetBySlugUnscoped(slug string) (*models.Category, error)
+	Restore(category *models.Category) error
 }
 
 // GormCategoryRepository GORM 实现
@@ -36,6 +40,15 @@ func NewCategoryRepository(db *gorm.DB) *GormCategoryRepository {
 func (r *GormCategoryRepository) List() ([]models.Category, error) {
 	var categories []models.Category
 	if err := r.db.Order("sort_order DESC, id ASC").Find(&categories).Error; err != nil {
+		return nil, err
+	}
+	return categories, nil
+}
+
+// ListActive 启用的分类列表
+func (r *GormCategoryRepository) ListActive() ([]models.Category, error) {
+	var categories []models.Category
+	if err := r.db.Where("is_active = ?", true).Order("sort_order DESC, id ASC").Find(&categories).Error; err != nil {
 		return nil, err
 	}
 	return categories, nil
@@ -61,6 +74,11 @@ func (r *GormCategoryRepository) Create(category *models.Category) error {
 // Update 更新分类
 func (r *GormCategoryRepository) Update(category *models.Category) error {
 	return r.db.Save(category).Error
+}
+
+// UpdateActive 更新启用状态
+func (r *GormCategoryRepository) UpdateActive(id string, active bool) error {
+	return r.db.Model(&models.Category{}).Where("id = ?", id).Update("is_active", active).Error
 }
 
 // Delete 删除分类
@@ -109,6 +127,30 @@ func (r *GormCategoryRepository) GetBySlug(slug string) (*models.Category, error
 		return nil, err
 	}
 	return &category, nil
+}
+
+// GetBySlugUnscoped 根据 slug 获取分类，包含软删除记录。
+func (r *GormCategoryRepository) GetBySlugUnscoped(slug string) (*models.Category, error) {
+	var category models.Category
+	if err := r.db.Unscoped().Where("slug = ?", slug).First(&category).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &category, nil
+}
+
+// Restore 恢复软删除分类并刷新展示信息。
+func (r *GormCategoryRepository) Restore(category *models.Category) error {
+	return r.db.Unscoped().Model(&models.Category{}).Where("id = ?", category.ID).Updates(map[string]interface{}{
+		"parent_id":  category.ParentID,
+		"name_json":  category.NameJSON,
+		"icon":       category.Icon,
+		"sort_order": category.SortOrder,
+		"is_active":  category.IsActive,
+		"deleted_at": nil,
+	}).Error
 }
 
 // CountActiveProducts 统计某分类下已上架商品数

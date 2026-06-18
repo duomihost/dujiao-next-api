@@ -3,7 +3,6 @@ package admin
 import (
 	"context"
 	"errors"
-	"strconv"
 
 	"github.com/dujiao-next/internal/cache"
 	"github.com/dujiao-next/internal/constants"
@@ -285,13 +284,11 @@ func (h *Handler) ResetTargetAdmin2FA(c *gin.Context) {
 		shared.RespondError(c, response.CodeForbidden, "error.forbidden", nil)
 		return
 	}
-	idStr := c.Param("id")
-	targetID64, err := strconv.ParseUint(idStr, 10, 64)
-	if err != nil || targetID64 == 0 {
+	targetID, err := shared.ParseParamUint(c, "id")
+	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", nil)
 		return
 	}
-	targetID := uint(targetID64)
 	if err := h.TOTPService.AdminReset(operatorID, targetID); err != nil {
 		switch {
 		case errors.Is(err, service.ErrTOTPCannotResetSelf):

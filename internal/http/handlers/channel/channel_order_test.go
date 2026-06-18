@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/models"
 	"github.com/dujiao-next/internal/service"
 	"github.com/gin-gonic/gin"
@@ -19,16 +20,18 @@ func TestBuildChannelOrderPreviewResponseIncludesTelegramFriendlyFields(t *testi
 		PromotionDiscountAmount: models.NewMoneyFromDecimal(decimal.RequireFromString("10.00")),
 		TotalAmount:             models.NewMoneyFromDecimal(decimal.RequireFromString("90.00")),
 		Items: []service.OrderPreviewItem{{
-			ProductID:         12,
-			SKUID:             34,
-			TitleJSON:         models.JSON{"zh-CN": "会员订阅"},
-			SKUSnapshotJSON:   models.JSON{"spec_values": models.JSON{"zh-CN": "季度版"}},
-			Quantity:          2,
-			UnitPrice:         models.NewMoneyFromDecimal(decimal.RequireFromString("54.00")),
-			TotalPrice:        models.NewMoneyFromDecimal(decimal.RequireFromString("108.00")),
-			CouponDiscount:    models.NewMoneyFromDecimal(decimal.RequireFromString("8.00")),
-			PromotionDiscount: models.NewMoneyFromDecimal(decimal.RequireFromString("10.00")),
-			FulfillmentType:   "manual",
+			ProductID:          12,
+			SKUID:              34,
+			TitleJSON:          models.JSON{"zh-CN": "会员订阅"},
+			SKUSnapshotJSON:    models.JSON{"spec_values": models.JSON{"zh-CN": "季度版"}},
+			Quantity:           2,
+			OriginalUnitPrice:  models.NewMoneyFromDecimal(decimal.RequireFromString("60.00")),
+			UnitPrice:          models.NewMoneyFromDecimal(decimal.RequireFromString("54.00")),
+			OriginalTotalPrice: models.NewMoneyFromDecimal(decimal.RequireFromString("120.00")),
+			TotalPrice:         models.NewMoneyFromDecimal(decimal.RequireFromString("108.00")),
+			CouponDiscount:     models.NewMoneyFromDecimal(decimal.RequireFromString("8.00")),
+			PromotionDiscount:  models.NewMoneyFromDecimal(decimal.RequireFromString("10.00")),
+			FulfillmentType:    "manual",
 		}},
 	}, "zh-CN")
 
@@ -44,6 +47,12 @@ func TestBuildChannelOrderPreviewResponseIncludesTelegramFriendlyFields(t *testi
 	}
 	if got := items[0]["coupon_discount"]; got != "8.00" {
 		t.Fatalf("expected coupon_discount=8.00, got=%v", got)
+	}
+	if got := items[0]["original_unit_price"]; got != "60.00" {
+		t.Fatalf("expected original_unit_price=60.00, got=%v", got)
+	}
+	if got := items[0]["original_total_price"]; got != "120.00" {
+		t.Fatalf("expected original_total_price=120.00, got=%v", got)
 	}
 	if got := items[0]["promotion_discount"]; got != "10.00" {
 		t.Fatalf("expected promotion_discount=10.00, got=%v", got)
@@ -72,16 +81,18 @@ func TestBuildChannelOrderDetailResponseUsesTotalPaidAmount(t *testing.T) {
 		UpdatedAt:               now,
 		PaidAt:                  &now,
 		Items: []models.OrderItem{{
-			ProductID:         1,
-			SKUID:             2,
-			TitleJSON:         models.JSON{"zh-CN": "测试商品"},
-			SKUSnapshotJSON:   models.JSON{"spec_values": models.JSON{"zh-CN": "标准版"}},
-			Quantity:          1,
-			UnitPrice:         models.NewMoneyFromDecimal(decimal.RequireFromString("80.00")),
-			TotalPrice:        models.NewMoneyFromDecimal(decimal.RequireFromString("80.00")),
-			CouponDiscount:    models.NewMoneyFromDecimal(decimal.RequireFromString("5.00")),
-			PromotionDiscount: models.NewMoneyFromDecimal(decimal.RequireFromString("15.00")),
-			FulfillmentType:   "manual",
+			ProductID:          1,
+			SKUID:              2,
+			TitleJSON:          models.JSON{"zh-CN": "测试商品"},
+			SKUSnapshotJSON:    models.JSON{"spec_values": models.JSON{"zh-CN": "标准版"}},
+			Quantity:           1,
+			OriginalUnitPrice:  models.NewMoneyFromDecimal(decimal.RequireFromString("100.00")),
+			UnitPrice:          models.NewMoneyFromDecimal(decimal.RequireFromString("80.00")),
+			OriginalTotalPrice: models.NewMoneyFromDecimal(decimal.RequireFromString("100.00")),
+			TotalPrice:         models.NewMoneyFromDecimal(decimal.RequireFromString("80.00")),
+			CouponDiscount:     models.NewMoneyFromDecimal(decimal.RequireFromString("5.00")),
+			PromotionDiscount:  models.NewMoneyFromDecimal(decimal.RequireFromString("15.00")),
+			FulfillmentType:    "manual",
 		}},
 		Children: []models.Order{{
 			ID:      8,
@@ -117,6 +128,12 @@ func TestBuildChannelOrderDetailResponseUsesTotalPaidAmount(t *testing.T) {
 	}
 	if got := items[0]["coupon_discount"]; got != "5.00" {
 		t.Fatalf("expected coupon_discount=5.00, got=%v", got)
+	}
+	if got := items[0]["original_unit_price"]; got != "100.00" {
+		t.Fatalf("expected original_unit_price=100.00, got=%v", got)
+	}
+	if got := items[0]["original_total_price"]; got != "100.00" {
+		t.Fatalf("expected original_total_price=100.00, got=%v", got)
 	}
 	if got := items[0]["promotion_discount"]; got != "15.00" {
 		t.Fatalf("expected promotion_discount=15.00, got=%v", got)
@@ -222,5 +239,186 @@ func TestCreateOrderRequestBindsAffiliateFields(t *testing.T) {
 	}
 	if req.AffiliateKey != "visitor-556677" {
 		t.Fatalf("expected affiliate visitor key to bind, got=%s", req.AffiliateKey)
+	}
+}
+
+func TestBuildChannelPaymentResponse_ProviderModeMatrix(t *testing.T) {
+	type wantUSDT struct {
+		address string
+		amount  string
+		chain   string
+		tokenID string
+	}
+	tests := []struct {
+		name            string
+		providerType    string
+		channelType     string
+		interactionMode string
+		payload         models.JSON
+		wantUSDT        *wantUSDT // nil => no wallet_address/chain_amount keys expected
+	}{
+		{name: "alipay qr", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypeAlipay, interactionMode: constants.PaymentInteractionQR},
+		{name: "alipay wap", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypeAlipay, interactionMode: constants.PaymentInteractionWAP},
+		{name: "alipay page", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypeAlipay, interactionMode: constants.PaymentInteractionPage},
+		{name: "wechat qr", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypeWechat, interactionMode: constants.PaymentInteractionQR},
+		{name: "wechat redirect", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypeWechat, interactionMode: constants.PaymentInteractionRedirect},
+		{name: "epay qr", providerType: constants.PaymentProviderEpay, channelType: "", interactionMode: constants.PaymentInteractionQR},
+		{name: "epay redirect", providerType: constants.PaymentProviderEpay, channelType: "", interactionMode: constants.PaymentInteractionRedirect},
+		{
+			name:            "bepusdt qr with usdt payload",
+			providerType:    constants.PaymentProviderBepusdt,
+			channelType:     "",
+			interactionMode: constants.PaymentInteractionQR,
+			payload:         models.JSON{"data": map[string]any{"token": "TBepAddr", "actual_amount": "13.45"}},
+			wantUSDT:        &wantUSDT{address: "TBepAddr", amount: "13.45"},
+		},
+		{name: "bepusdt redirect", providerType: constants.PaymentProviderBepusdt, channelType: "", interactionMode: constants.PaymentInteractionRedirect, payload: models.JSON{"data": map[string]any{"token": "TBepAddr", "actual_amount": "13.45"}}},
+		{
+			name:            "epusdt qr with receive_address payload",
+			providerType:    constants.PaymentProviderEpusdt,
+			channelType:     "",
+			interactionMode: constants.PaymentInteractionQR,
+			payload:         models.JSON{"data": map[string]any{"receive_address": "TEpusdtAddr", "actual_amount": "9.99"}},
+			wantUSDT:        &wantUSDT{address: "TEpusdtAddr", amount: "9.99"},
+		},
+		{
+			name:            "epusdt qr without receive_address still surfaces chain amount",
+			providerType:    constants.PaymentProviderEpusdt,
+			channelType:     "",
+			interactionMode: constants.PaymentInteractionQR,
+			payload:         models.JSON{"data": map[string]any{"actual_amount": "5.00"}},
+			wantUSDT:        &wantUSDT{address: "", amount: "5.00"},
+		},
+		{name: "epusdt redirect", providerType: constants.PaymentProviderEpusdt, channelType: "", interactionMode: constants.PaymentInteractionRedirect},
+		{
+			name:            "dujiaopay qr with wallet payload",
+			providerType:    constants.PaymentProviderDujiaoPay,
+			channelType:     "tron-usdt",
+			interactionMode: constants.PaymentInteractionQR,
+			payload: models.JSON{
+				"chain":          "tron",
+				"token_id":       "tron-usdt",
+				"pay_address":    "TDujiaoAddr",
+				"payable_amount": "10.0001",
+			},
+			wantUSDT: &wantUSDT{address: "TDujiaoAddr", amount: "10.0001", chain: "tron", tokenID: "tron-usdt"},
+		},
+		{name: "okpay qr", providerType: constants.PaymentProviderOkpay, channelType: "", interactionMode: constants.PaymentInteractionQR},
+		{name: "okpay redirect", providerType: constants.PaymentProviderOkpay, channelType: "", interactionMode: constants.PaymentInteractionRedirect},
+		{name: "stripe redirect", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypeStripe, interactionMode: constants.PaymentInteractionRedirect},
+		{name: "paypal redirect", providerType: constants.PaymentProviderOfficial, channelType: constants.PaymentChannelTypePaypal, interactionMode: constants.PaymentInteractionRedirect},
+		{name: "tokenpay qr", providerType: constants.PaymentProviderTokenpay, channelType: "", interactionMode: constants.PaymentInteractionQR},
+		{name: "tokenpay redirect", providerType: constants.PaymentProviderTokenpay, channelType: "", interactionMode: constants.PaymentInteractionRedirect},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			channelType := tc.channelType
+			if channelType == "" {
+				channelType = "test-channel-type"
+			}
+			payment := &models.Payment{
+				ID:              1,
+				OrderID:         2,
+				ChannelID:       3,
+				ProviderType:    tc.providerType,
+				ChannelType:     channelType,
+				InteractionMode: tc.interactionMode,
+				Status:          constants.PaymentStatusPending,
+				Amount:          models.NewMoneyFromDecimal(decimal.RequireFromString("100")),
+				FeeRate:         models.Money{},
+				FeeAmount:       models.Money{},
+				Currency:        "CNY",
+				PayURL:          "https://pay.example.com/c/abc",
+				QRCode:          "https://pay.example.com/c/abc-qr",
+				ProviderPayload: tc.payload,
+			}
+			resp := buildChannelPaymentResponse(nil, payment)
+			if got := resp["interaction_mode"]; got != tc.interactionMode {
+				t.Errorf("interaction_mode: got %v want %v", got, tc.interactionMode)
+			}
+			if got := resp["pay_url"]; got != "https://pay.example.com/c/abc" {
+				t.Errorf("pay_url: got %v", got)
+			}
+			if got := resp["qr_code"]; got != "https://pay.example.com/c/abc-qr" {
+				t.Errorf("qr_code: got %v", got)
+			}
+			if tc.wantUSDT == nil {
+				if _, ok := resp["wallet_address"]; ok {
+					t.Errorf("wallet_address should be absent, got %v", resp["wallet_address"])
+				}
+				if _, ok := resp["chain_amount"]; ok {
+					t.Errorf("chain_amount should be absent, got %v", resp["chain_amount"])
+				}
+				if _, ok := resp["chain"]; ok {
+					t.Errorf("chain should be absent, got %v", resp["chain"])
+				}
+				if _, ok := resp["token_id"]; ok {
+					t.Errorf("token_id should be absent, got %v", resp["token_id"])
+				}
+				return
+			}
+			if tc.wantUSDT.address == "" {
+				if _, ok := resp["wallet_address"]; ok {
+					t.Errorf("wallet_address should be absent, got %v", resp["wallet_address"])
+				}
+			} else if got := resp["wallet_address"]; got != tc.wantUSDT.address {
+				t.Errorf("wallet_address: got %v want %v", got, tc.wantUSDT.address)
+			}
+			if tc.wantUSDT.amount == "" {
+				if _, ok := resp["chain_amount"]; ok {
+					t.Errorf("chain_amount should be absent, got %v", resp["chain_amount"])
+				}
+			} else if got := resp["chain_amount"]; got != tc.wantUSDT.amount {
+				t.Errorf("chain_amount: got %v want %v", got, tc.wantUSDT.amount)
+			}
+			if tc.wantUSDT.chain == "" {
+				if _, ok := resp["chain"]; ok {
+					t.Errorf("chain should be absent, got %v", resp["chain"])
+				}
+			} else if got := resp["chain"]; got != tc.wantUSDT.chain {
+				t.Errorf("chain: got %v want %v", got, tc.wantUSDT.chain)
+			}
+			if tc.wantUSDT.tokenID == "" {
+				if _, ok := resp["token_id"]; ok {
+					t.Errorf("token_id should be absent, got %v", resp["token_id"])
+				}
+			} else if got := resp["token_id"]; got != tc.wantUSDT.tokenID {
+				t.Errorf("token_id: got %v want %v", got, tc.wantUSDT.tokenID)
+			}
+		})
+	}
+}
+
+func TestBuildChannelPaymentResponse_USDTQRExposesWalletFields(t *testing.T) {
+	payment := &models.Payment{
+		ID:              42,
+		OrderID:         1,
+		ChannelID:       2,
+		ProviderType:    constants.PaymentProviderBepusdt,
+		ChannelType:     "usdt-trc20",
+		InteractionMode: constants.PaymentInteractionQR,
+		Status:          constants.PaymentStatusPending,
+		Amount:          models.NewMoneyFromDecimal(decimal.RequireFromString("100.00")),
+		FeeRate:         models.Money{},
+		FeeAmount:       models.Money{},
+		Currency:        "CNY",
+		PayURL:          "https://pay.example.com/c/abc",
+		QRCode:          "https://pay.example.com/c/abc",
+		ProviderPayload: models.JSON{
+			"data": map[string]any{
+				"token":         "TXxxxxx",
+				"actual_amount": "13.45",
+			},
+		},
+	}
+	resp := buildChannelPaymentResponse(nil, payment)
+	if got := resp["wallet_address"]; got != "TXxxxxx" {
+		t.Fatalf("wallet_address: got %v want TXxxxxx", got)
+	}
+	if got := resp["chain_amount"]; got != "13.45" {
+		t.Fatalf("chain_amount: got %v want 13.45", got)
+	}
+	if got := resp["interaction_mode"]; got != constants.PaymentInteractionQR {
+		t.Fatalf("interaction_mode: got %v want qr", got)
 	}
 }

@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
-	"net/url"
 	"strings"
 	"time"
 )
@@ -41,27 +40,4 @@ func pickFirstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
-}
-
-// appendURLQuery 向 URL 追加查询参数。
-func appendURLQuery(rawURL string, params map[string]string) string {
-	rawURL = strings.TrimSpace(rawURL)
-	if rawURL == "" {
-		return ""
-	}
-	parsed, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	query := parsed.Query()
-	for key, value := range params {
-		key = strings.TrimSpace(key)
-		value = strings.TrimSpace(value)
-		if key == "" || value == "" {
-			continue
-		}
-		query.Set(key, value)
-	}
-	parsed.RawQuery = query.Encode()
-	return parsed.String()
 }

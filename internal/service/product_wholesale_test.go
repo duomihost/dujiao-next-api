@@ -1,0 +1,150 @@
+package service
+
+import (
+	"errors"
+	"testing"
+
+	"github.com/dujiao-next/internal/models"
+
+	"github.com/shopspring/decimal"
+)
+
+func TestNormalizeWholesalePriceInputsSortsTiers(t *testing.T) {
+	tiers, err := normalizeWholesalePriceInputs([]WholesalePriceInput{
+		{MinQuantity: 10, UnitPrice: decimal.NewFromInt(70)},
+		{MinQuantity: 5, UnitPrice: decimal.NewFromInt(80)},
+	})
+	if err != nil {
+		t.Fatalf("normalizeWholesalePriceInputs returned error: %v", err)
+	}
+	if len(tiers) != 2 {
+		t.Fatalf("expected 2 tiers, got %d", len(tiers))
+	}
+	if tiers[0].MinQuantity != 5 || tiers[0].UnitPrice.String() != "80.00" {
+		t.Fatalf("unexpected first tier: %+v", tiers[0])
+	}
+	if tiers[1].MinQuantity != 10 || tiers[1].UnitPrice.String() != "70.00" {
+		t.Fatalf("unexpected second tier: %+v", tiers[1])
+	}
+}
+
+func TestNormalizeWholesalePriceInputsRejectsInvalidTiers(t *testing.T) {
+	tests := []struct {
+		name   string
+		inputs []WholesalePriceInput
+	}{
+		{
+			name:   "zero quantity",
+			inputs: []WholesalePriceInput{{MinQuantity: 0, UnitPrice: decimal.NewFromInt(80)}},
+		},
+		{
+			name:   "zero price",
+			inputs: []WholesalePriceInput{{MinQuantity: 5, UnitPrice: decimal.Zero}},
+		},
+		{
+			name: "duplicate quantity",
+			inputs: []WholesalePriceInput{
+				{MinQuantity: 5, UnitPrice: decimal.NewFromInt(80)},
+				{MinQuantity: 5, UnitPrice: decimal.NewFromInt(70)},
+			},
+		},
+		{
+			name: "higher tier more expensive",
+			inputs: []WholesalePriceInput{
+				{MinQuantity: 5, UnitPrice: decimal.NewFromInt(80)},
+				{MinQuantity: 10, UnitPrice: decimal.NewFromInt(90)},
+			},
+		},
+		{
+			name: "higher tier equal price",
+			inputs: []WholesalePriceInput{
+				{MinQuantity: 5, UnitPrice: decimal.NewFromInt(80)},
+				{MinQuantity: 10, UnitPrice: decimal.NewFromInt(80)},
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := normalizeWholesalePriceInputs(tc.inputs)
+			if !errors.Is(err, ErrWholesalePriceInvalid) {
+				t.Fatalf("expected ErrWholesalePriceInvalid, got %v", err)
+			}
+		})
+	}
+}
+
+func TestResolveWholesaleUnitPriceMatchesBestTier(t *testing.T) {
+	product := &models.Product{
+		WholesalePrices: models.WholesalePriceTiers{
+			{MinQuantity: 5, UnitPrice: models.NewMoneyFromDecimal(decimal.NewFromInt(80))},
+			{MinQuantity: 10, UnitPrice: models.NewMoneyFromDecimal(decimal.NewFromInt(70))},
+		},
+	}
+
+	unitPrice, discount, matched := ResolveWholesaleUnitPrice(product, decimal.NewFromInt(100), 12)
+	if !matched {
+		t.Fatalf("expected wholesale tier to match")
+	}
+	if !unitPrice.Equal(decimal.NewFromInt(70)) {
+		t.Fatalf("expected unit price 70, got %s", unitPrice.String())
+	}
+	if !discount.Equal(decimal.NewFromInt(360)) {
+		t.Fatalf("expected discount 360, got %s", discount.String())
+	}
+}
+
+func TestResolveWholesaleUnitPriceDoesNotMatchBelowQuantity(t *testing.T) {
+	product := &models.Product{
+		WholesalePrices: models.WholesalePriceTiers{
+			{MinQuantity: 5, UnitPrice: models.NewMoneyFromDecimal(decimal.NewFromInt(80))},
+		},
+	}
+
+	unitPrice, discount, matched := ResolveWholesaleUnitPrice(product, decimal.NewFromInt(100), 4)
+	if matched {
+		t.Fatalf("expected no wholesale tier to match")
+	}
+	if !unitPrice.Equal(decimal.NewFromInt(100)) || !discount.IsZero() {
+		t.Fatalf("unexpected price result: unit=%s discount=%s", unitPrice.String(), discount.String())
+	}
+}
+
+// TestResolveWholesaleUnitPricePicksCheapestTierForLegacyData 验证即便历史脏数据
+// 存在非单调阶梯（高门槛档单价反而更高），选档也按单价最低者成交，避免「买更多反而更贵」。
+func TestResolveWholesaleUnitPricePicksCheapestTierForLegacyData(t *testing.T) {
+	product := &models.Product{
+		WholesalePrices: models.WholesalePriceTiers{
+			{MinQuantity: 5, UnitPrice: models.NewMoneyFromDecimal(decimal.NewFromInt(80))},
+			{MinQuantity: 10, UnitPrice: models.NewMoneyFromDecimal(decimal.NewFromInt(90))},
+		},
+	}
+
+	// 购买 10 件时两档均满足门槛，应取更便宜的 80 而非门槛更高的 90。
+	unitPrice, discount, matched := ResolveWholesaleUnitPrice(product, decimal.NewFromInt(100), 10)
+	if !matched {
+		t.Fatalf("expected wholesale tier to match")
+	}
+	if !unitPrice.Equal(decimal.NewFromInt(80)) {
+		t.Fatalf("expected unit price 80, got %s", unitPrice.String())
+	}
+	if !discount.Equal(decimal.NewFromInt(200)) {
+		t.Fatalf("expected discount 200, got %s", discount.String())
+	}
+}
+
+func TestResolveWholesaleUnitPriceIgnoresHigherTierPrice(t *testing.T) {
+	product := &models.Product{
+		WholesalePrices: models.WholesalePriceTiers{
+			{MinQuantity: 5, UnitPrice: models.NewMoneyFromDecimal(decimal.NewFromInt(120))},
+		},
+	}
+
+	unitPrice, discount, matched := ResolveWholesaleUnitPrice(product, decimal.NewFromInt(100), 5)
+	if matched {
+		t.Fatalf("expected higher wholesale price to be ignored")
+	}
+	if !unitPrice.Equal(decimal.NewFromInt(100)) || !discount.IsZero() {
+		t.Fatalf("unexpected price result: unit=%s discount=%s", unitPrice.String(), discount.String())
+	}
+}

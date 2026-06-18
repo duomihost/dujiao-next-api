@@ -110,26 +110,7 @@ func (h *Handler) UpsertCartItem(c *gin.Context) {
 		Quantity:        req.Quantity,
 		FulfillmentType: req.FulfillmentType,
 	}); err != nil {
-		switch {
-		case errors.Is(err, service.ErrProductSKURequired):
-			shared.RespondError(c, response.CodeBadRequest, "error.order_item_invalid", nil)
-		case errors.Is(err, service.ErrProductSKUInvalid):
-			shared.RespondError(c, response.CodeBadRequest, "error.order_item_invalid", nil)
-		case errors.Is(err, service.ErrInvalidOrderItem):
-			shared.RespondError(c, response.CodeBadRequest, "error.order_item_invalid", nil)
-		case errors.Is(err, service.ErrProductMaxPurchaseExceeded):
-			shared.RespondError(c, response.CodeBadRequest, "error.product_max_purchase_exceeded", nil)
-		case errors.Is(err, service.ErrProductMinPurchaseNotMet):
-			shared.RespondError(c, response.CodeBadRequest, "error.product_min_purchase_not_met", nil)
-		case errors.Is(err, service.ErrProductNotAvailable):
-			shared.RespondError(c, response.CodeBadRequest, "error.product_not_available", nil)
-		case errors.Is(err, service.ErrManualStockInsufficient):
-			shared.RespondError(c, response.CodeBadRequest, "error.manual_stock_insufficient", nil)
-		case errors.Is(err, service.ErrFulfillmentInvalid):
-			shared.RespondError(c, response.CodeBadRequest, "error.fulfillment_invalid", nil)
-		default:
-			shared.RespondError(c, response.CodeInternal, "error.order_update_failed", err)
-		}
+		respondCartItemUpdateError(c, err)
 		return
 	}
 	response.Success(c, gin.H{"updated": true})

@@ -2,7 +2,6 @@ package public
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -100,9 +99,7 @@ func (h *Handler) ListAffiliateCommissions(c *gin.Context) {
 		shared.RespondError(c, response.CodeInternal, "error.user_fetch_failed", nil)
 		return
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 	status := strings.TrimSpace(c.Query("status"))
 
 	rows, total, err := h.AffiliateService.ListUserCommissions(uid, page, pageSize, status)
@@ -123,9 +120,7 @@ func (h *Handler) ListAffiliateWithdraws(c *gin.Context) {
 		shared.RespondError(c, response.CodeInternal, "error.user_fetch_failed", nil)
 		return
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 	status := strings.TrimSpace(c.Query("status"))
 
 	rows, total, err := h.AffiliateService.ListUserWithdraws(uid, page, pageSize, status)

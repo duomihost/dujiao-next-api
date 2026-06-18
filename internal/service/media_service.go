@@ -163,3 +163,17 @@ func (s *MediaService) Delete(id uint) error {
 	}
 	return nil
 }
+
+// BatchDelete 批量删除素材，复用单个删除逻辑以保持文件清理行为一致。
+func (s *MediaService) BatchDelete(ids []uint) (int, []uint) {
+	successCount := 0
+	failedIDs := make([]uint, 0)
+	for _, id := range ids {
+		if err := s.Delete(id); err == nil {
+			successCount++
+		} else {
+			failedIDs = append(failedIDs, id)
+		}
+	}
+	return successCount, failedIDs
+}

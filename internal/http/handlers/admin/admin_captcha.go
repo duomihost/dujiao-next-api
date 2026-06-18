@@ -45,7 +45,7 @@ func (h *Handler) UpdateCaptchaSettings(c *gin.Context) {
 		h.CaptchaService.SetDefaultConfig(h.Config.Captcha)
 		h.CaptchaService.InvalidateCache()
 	}
-	_ = cache.Del(c.Request.Context(), publicConfigCacheKey)
+	_ = cache.DelAllPublicConfig(c.Request.Context())
 
 	response.Success(c, service.MaskCaptchaSettingForAdmin(setting))
 }

@@ -20,9 +20,7 @@ func (h *Handler) GetProcurementOrders(c *gin.Context) {
 		shared.RespondErrorWithMsg(c, response.CodeInternal, "service not available", nil)
 		return
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	filter := repository.ProcurementOrderListFilter{
 		Pagination: repository.Pagination{Page: page, PageSize: pageSize},
@@ -41,17 +39,12 @@ func (h *Handler) GetProcurementOrders(c *gin.Context) {
 	if upstreamOrderNo := strings.TrimSpace(c.Query("upstream_order_no")); upstreamOrderNo != "" {
 		filter.UpstreamOrderNo = upstreamOrderNo
 	}
-	createdFrom, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("created_from")))
+	createdFrom, createdTo, err := shared.ParseQueryTimeRange(c, "created_from", "created_to")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
 	}
 	filter.CreatedFrom = createdFrom
-	createdTo, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("created_to")))
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
 	filter.CreatedTo = createdTo
 
 	orders, total, err := h.ProcurementOrderService.List(filter)
@@ -83,17 +76,12 @@ func (h *Handler) GetProcurementOrderStats(c *gin.Context) {
 	if upstreamOrderNo := strings.TrimSpace(c.Query("upstream_order_no")); upstreamOrderNo != "" {
 		filter.UpstreamOrderNo = upstreamOrderNo
 	}
-	createdFrom, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("created_from")))
+	createdFrom, createdTo, err := shared.ParseQueryTimeRange(c, "created_from", "created_to")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
 	}
 	filter.CreatedFrom = createdFrom
-	createdTo, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("created_to")))
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
 	filter.CreatedTo = createdTo
 
 	stats, err := h.ProcurementOrderService.StatsByStatus(filter)

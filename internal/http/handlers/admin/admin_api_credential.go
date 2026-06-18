@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/http/response"
@@ -14,9 +13,7 @@ import (
 
 // GetApiCredentials 获取 API 凭证列表
 func (h *Handler) GetApiCredentials(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 	status := c.Query("status")
 	search := c.Query("search")
 	userID, _ := shared.ParseQueryUint(c.Query("user_id"), false)

@@ -27,6 +27,23 @@ type authzSetAdminRolesPayload struct {
 	Roles []string `json:"roles"`
 }
 
+func buildAuthzPolicyAuditRecord(c *gin.Context, req authzPolicyPayload, action string) service.AuthzAuditRecordInput {
+	return service.AuthzAuditRecordInput{
+		OperatorAdminID:  c.GetUint("admin_id"),
+		OperatorUsername: strings.TrimSpace(c.GetString("username")),
+		Action:           action,
+		Role:             req.Role,
+		Object:           req.Object,
+		Method:           req.Action,
+		RequestID:        strings.TrimSpace(c.GetString("request_id")),
+		Detail: models.JSON{
+			"role":   req.Role,
+			"object": req.Object,
+			"method": strings.ToUpper(strings.TrimSpace(req.Action)),
+		},
+	}
+}
+
 // GetAuthzMe 获取当前管理员权限快照
 func (h *Handler) GetAuthzMe(c *gin.Context) {
 	adminID, ok := shared.GetAdminID(c)
@@ -194,20 +211,7 @@ func (h *Handler) GrantAuthzPolicy(c *gin.Context) {
 		return
 	}
 
-	h.recordAuthzAudit(c, service.AuthzAuditRecordInput{
-		OperatorAdminID:  c.GetUint("admin_id"),
-		OperatorUsername: strings.TrimSpace(c.GetString("username")),
-		Action:           "policy_grant",
-		Role:             req.Role,
-		Object:           req.Object,
-		Method:           req.Action,
-		RequestID:        strings.TrimSpace(c.GetString("request_id")),
-		Detail: models.JSON{
-			"role":   req.Role,
-			"object": req.Object,
-			"method": strings.ToUpper(strings.TrimSpace(req.Action)),
-		},
-	})
+	h.recordAuthzAudit(c, buildAuthzPolicyAuditRecord(c, req, "policy_grant"))
 
 	logger.Infow("admin_authz_policy_granted",
 		"operator_admin_id", c.GetUint("admin_id"),
@@ -232,20 +236,7 @@ func (h *Handler) RevokeAuthzPolicy(c *gin.Context) {
 		return
 	}
 
-	h.recordAuthzAudit(c, service.AuthzAuditRecordInput{
-		OperatorAdminID:  c.GetUint("admin_id"),
-		OperatorUsername: strings.TrimSpace(c.GetString("username")),
-		Action:           "policy_revoke",
-		Role:             req.Role,
-		Object:           req.Object,
-		Method:           req.Action,
-		RequestID:        strings.TrimSpace(c.GetString("request_id")),
-		Detail: models.JSON{
-			"role":   req.Role,
-			"object": req.Object,
-			"method": strings.ToUpper(strings.TrimSpace(req.Action)),
-		},
-	})
+	h.recordAuthzAudit(c, buildAuthzPolicyAuditRecord(c, req, "policy_revoke"))
 
 	logger.Infow("admin_authz_policy_revoked",
 		"operator_admin_id", c.GetUint("admin_id"),

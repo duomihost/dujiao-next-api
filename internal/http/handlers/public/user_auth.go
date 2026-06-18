@@ -91,6 +91,8 @@ func (h *Handler) SendUserVerifyCode(c *gin.Context) {
 			shared.RespondError(c, response.CodeBadRequest, "error.verify_purpose_invalid", nil)
 		case errors.Is(err, service.ErrEmailExists):
 			shared.RespondError(c, response.CodeBadRequest, "error.email_exists", nil)
+		case errors.Is(err, service.ErrEmailDomainNotAllowed):
+			shared.RespondError(c, response.CodeBadRequest, "error.email_domain_not_allowed", nil)
 		case errors.Is(err, service.ErrNotFound):
 			shared.RespondError(c, response.CodeNotFound, "error.user_not_found", nil)
 		case errors.Is(err, service.ErrVerifyCodeTooFrequent):
@@ -150,6 +152,8 @@ func (h *Handler) UserRegister(c *gin.Context) {
 			shared.RespondError(c, response.CodeBadRequest, "error.email_invalid", nil)
 		case errors.Is(err, service.ErrEmailExists):
 			shared.RespondError(c, response.CodeBadRequest, "error.email_exists", nil)
+		case errors.Is(err, service.ErrEmailDomainNotAllowed):
+			shared.RespondError(c, response.CodeBadRequest, "error.email_domain_not_allowed", nil)
 		case errors.Is(err, service.ErrVerifyCodeInvalid):
 			shared.RespondError(c, response.CodeBadRequest, "error.verify_code_invalid", nil)
 		case errors.Is(err, service.ErrVerifyCodeExpired):
@@ -320,35 +324,7 @@ func (h *Handler) UserTelegramLogin(c *gin.Context) {
 		Context: c.Request.Context(),
 	})
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrTelegramAuthDisabled):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonTelegramConfig, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_disabled", nil)
-		case errors.Is(err, service.ErrTelegramAuthConfigInvalid):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonTelegramConfig, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeInternal, "error.telegram_auth_config_invalid", err)
-		case errors.Is(err, service.ErrTelegramAuthPayloadInvalid):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonTelegramInvalid, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_payload_invalid", nil)
-		case errors.Is(err, service.ErrTelegramAuthSignatureInvalid):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonTelegramInvalid, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_signature_invalid", nil)
-		case errors.Is(err, service.ErrTelegramAuthExpired):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonTelegramExpired, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_expired", nil)
-		case errors.Is(err, service.ErrTelegramAuthReplay):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonTelegramReplayed, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_replayed", nil)
-		case errors.Is(err, service.ErrUserDisabled):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonUserDisabled, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeUnauthorized, "error.user_disabled", nil)
-		case errors.Is(err, service.ErrRegistrationDisabled):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonBadRequest, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeForbidden, "error.registration_disabled", nil)
-		default:
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonInternalError, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeInternal, "error.login_failed", err)
-		}
+		h.respondTelegramLoginError(c, err)
 		return
 	}
 
@@ -385,35 +361,7 @@ func (h *Handler) UserTelegramMiniAppLogin(c *gin.Context) {
 		Context:  c.Request.Context(),
 	})
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrTelegramAuthDisabled):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonTelegramConfig, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_disabled", nil)
-		case errors.Is(err, service.ErrTelegramAuthConfigInvalid):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonTelegramConfig, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeInternal, "error.telegram_auth_config_invalid", err)
-		case errors.Is(err, service.ErrTelegramAuthPayloadInvalid):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonTelegramInvalid, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_payload_invalid", nil)
-		case errors.Is(err, service.ErrTelegramAuthSignatureInvalid):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonTelegramInvalid, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_signature_invalid", nil)
-		case errors.Is(err, service.ErrTelegramAuthExpired):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonTelegramExpired, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_expired", nil)
-		case errors.Is(err, service.ErrTelegramAuthReplay):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonTelegramReplayed, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_replayed", nil)
-		case errors.Is(err, service.ErrUserDisabled):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonUserDisabled, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeUnauthorized, "error.user_disabled", nil)
-		case errors.Is(err, service.ErrRegistrationDisabled):
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonBadRequest, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeForbidden, "error.registration_disabled", nil)
-		default:
-			h.recordUserLogin(c, "", 0, constants.LoginLogStatusFailed, constants.LoginLogFailReasonInternalError, constants.LoginLogSourceTelegram)
-			shared.RespondError(c, response.CodeInternal, "error.login_failed", err)
-		}
+		h.respondTelegramLoginError(c, err)
 		return
 	}
 
@@ -437,7 +385,7 @@ func (h *Handler) UserTelegramMiniAppLogin(c *gin.Context) {
 }
 
 func (h *Handler) recordUserLogin(c *gin.Context, email string, userID uint, status, failReason, source string) {
-	if h == nil || h.UserLoginLogService == nil {
+	if h == nil || h.Container == nil || h.UserLoginLogService == nil {
 		return
 	}
 	requestID := ""
@@ -591,26 +539,7 @@ func (h *Handler) BindMyTelegram(c *gin.Context) {
 		Context: c.Request.Context(),
 	})
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrTelegramAuthDisabled):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_disabled", nil)
-		case errors.Is(err, service.ErrTelegramAuthConfigInvalid):
-			shared.RespondError(c, response.CodeInternal, "error.telegram_auth_config_invalid", err)
-		case errors.Is(err, service.ErrTelegramAuthPayloadInvalid):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_payload_invalid", nil)
-		case errors.Is(err, service.ErrTelegramAuthSignatureInvalid):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_signature_invalid", nil)
-		case errors.Is(err, service.ErrTelegramAuthExpired):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_expired", nil)
-		case errors.Is(err, service.ErrTelegramAuthReplay):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_replayed", nil)
-		case errors.Is(err, service.ErrUserOAuthIdentityExists):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_bind_conflict", nil)
-		case errors.Is(err, service.ErrUserOAuthAlreadyBound):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_already_bound", nil)
-		default:
-			shared.RespondError(c, response.CodeInternal, "error.user_update_failed", err)
-		}
+		respondTelegramBindError(c, err)
 		return
 	}
 	response.Success(c, dto.NewTelegramBindingResp(identity))
@@ -634,26 +563,7 @@ func (h *Handler) BindMyTelegramMiniApp(c *gin.Context) {
 		Context:  c.Request.Context(),
 	})
 	if err != nil {
-		switch {
-		case errors.Is(err, service.ErrTelegramAuthDisabled):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_disabled", nil)
-		case errors.Is(err, service.ErrTelegramAuthConfigInvalid):
-			shared.RespondError(c, response.CodeInternal, "error.telegram_auth_config_invalid", err)
-		case errors.Is(err, service.ErrTelegramAuthPayloadInvalid):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_payload_invalid", nil)
-		case errors.Is(err, service.ErrTelegramAuthSignatureInvalid):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_signature_invalid", nil)
-		case errors.Is(err, service.ErrTelegramAuthExpired):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_expired", nil)
-		case errors.Is(err, service.ErrTelegramAuthReplay):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_auth_replayed", nil)
-		case errors.Is(err, service.ErrUserOAuthIdentityExists):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_bind_conflict", nil)
-		case errors.Is(err, service.ErrUserOAuthAlreadyBound):
-			shared.RespondError(c, response.CodeBadRequest, "error.telegram_already_bound", nil)
-		default:
-			shared.RespondError(c, response.CodeInternal, "error.user_update_failed", err)
-		}
+		respondTelegramBindError(c, err)
 		return
 	}
 	response.Success(c, dto.NewTelegramBindingResp(identity))

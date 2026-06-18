@@ -1,34 +1,129 @@
 package service
 
 import (
-	"encoding/json"
 	"errors"
-	"fmt"
-	"net/http"
 	"strings"
 	"time"
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/models"
-	"github.com/dujiao-next/internal/payment/paypal"
-	"github.com/dujiao-next/internal/payment/stripe"
-	"github.com/dujiao-next/internal/payment/wechatpay"
+	"github.com/dujiao-next/internal/payment/provider"
 	"github.com/dujiao-next/internal/repository"
 
-	"github.com/shopspring/decimal"
+	"go.uber.org/zap"
 )
+
+// HandleSyncCallback 处理同步 form callback（alipay/epay/epusdt/bepusdt/tokenpay/okpay）。
+// 通过 Registry 找到 adapter 的 CallbackVerifier 能力解析并验签 form/body，然后调 HandleCallback。
+// channel 必须由 caller 加载好传入（handler 负责找到 payment→channel 并验证类型）。
+func (s *PaymentService) HandleSyncCallback(
+	channel *models.PaymentChannel,
+	form map[string][]string,
+	body []byte,
+) (*models.Payment, error) {
+	if channel == nil {
+		return nil, ErrPaymentChannelNotFound
+	}
+	if s.paymentProviderRegistry == nil {
+		return nil, ErrPaymentProviderNotSupported
+	}
+
+	p, ok := s.paymentProviderRegistry.Lookup(channel.ProviderType, channel.ChannelType)
+	if !ok {
+		return nil, ErrPaymentProviderNotSupported
+	}
+	verifier, ok := p.(provider.CallbackVerifier)
+	if !ok {
+		return nil, ErrPaymentProviderNotSupported
+	}
+
+	result, err := verifier.VerifyCallback(channel.ConfigJSON, form, body)
+	if err != nil {
+		return nil, mapProviderErrorToService(err)
+	}
+
+	// WebhookResult = CallbackResult（类型别名），findWebhookPayment 直接复用。
+	payment, err := s.findWebhookPayment(channel.ID, result)
+	if err != nil {
+		return nil, err
+	}
+
+	payload := models.JSON{}
+	if result.Payload != nil {
+		payload = result.Payload
+	}
+
+	callbackInput := PaymentCallbackInput{
+		PaymentID:   payment.ID,
+		ChannelID:   channel.ID,
+		Status:      result.Status,
+		ProviderRef: pickFirstNonEmpty(result.ProviderRef, payment.ProviderRef),
+		Amount:      result.Amount,
+		Currency:    strings.ToUpper(strings.TrimSpace(result.Currency)),
+		PaidAt:      result.PaidAt,
+		Payload:     payload,
+	}
+	return s.HandleCallback(callbackInput)
+}
 
 // HandlePaypalWebhook 处理 PayPal webhook。
 func (s *PaymentService) HandlePaypalWebhook(input WebhookCallbackInput) (*models.Payment, string, error) {
+	return s.handleWebhookViaRegistry(
+		input,
+		constants.PaymentProviderOfficial,
+		constants.PaymentChannelTypePaypal,
+	)
+}
+
+// HandleDujiaoPayWebhook 处理 DujiaoPay webhook。
+//
+// DujiaoPay 的 channel_type 是 token_id（tron-usdt/base-usdc 等），同一个 webhook
+// 入口不能预先知道 token_id。channel_id 缺失时按 provider_type 拉取所有启用渠道，
+// 用 webhook_secret 逐个验签；只有签名匹配的渠道才会进入落库流程。
+func (s *PaymentService) HandleDujiaoPayWebhook(input WebhookCallbackInput) (*models.Payment, string, error) {
 	log := paymentLogger(
-		"provider", constants.PaymentChannelTypePaypal,
+		"provider", constants.PaymentProviderDujiaoPay,
 		"channel_id", input.ChannelID,
 		"body_size", len(input.Body),
 	)
+
 	if input.ChannelID == 0 {
-		log.Warnw("payment_webhook_invalid_channel_id")
-		return nil, "", ErrPaymentInvalid
+		candidates, _, err := s.channelRepo.List(repository.PaymentChannelListFilter{
+			ProviderType: constants.PaymentProviderDujiaoPay,
+			ActiveOnly:   true,
+		})
+		if err != nil {
+			log.Errorw("payment_webhook_candidates_list_failed", "error", err)
+			return nil, "", ErrPaymentUpdateFailed
+		}
+		if len(candidates) == 0 {
+			log.Warnw("payment_webhook_no_candidate_channel")
+			return nil, "", ErrPaymentChannelNotFound
+		}
+
+		var lastErr error
+		for i := range candidates {
+			channel := candidates[i]
+			result, err := s.tryParseWebhookWithChannel(&channel, input)
+			if err != nil {
+				log.Debugw("payment_webhook_candidate_parse_failed",
+					"candidate_channel_id", channel.ID,
+					"channel_type", channel.ChannelType,
+					"error", err,
+				)
+				lastErr = err
+				continue
+			}
+			log.Infow("payment_webhook_candidate_matched", "candidate_channel_id", channel.ID, "channel_type", channel.ChannelType)
+			return s.commitVerifiedWebhook(&channel, result, log)
+		}
+		if lastErr == nil {
+			lastErr = ErrPaymentProviderNotSupported
+		}
+		log.Warnw("payment_webhook_all_candidates_failed", "candidate_count", len(candidates), "last_error", lastErr)
+		return nil, "", lastErr
 	}
+
 	channel, err := s.channelRepo.GetByID(input.ChannelID)
 	if err != nil {
 		log.Errorw("payment_webhook_channel_fetch_failed", "error", err)
@@ -38,9 +133,7 @@ func (s *PaymentService) HandlePaypalWebhook(input WebhookCallbackInput) (*model
 		log.Warnw("payment_webhook_channel_not_found")
 		return nil, "", ErrPaymentChannelNotFound
 	}
-	providerType := strings.ToLower(strings.TrimSpace(channel.ProviderType))
-	channelType := strings.ToLower(strings.TrimSpace(channel.ChannelType))
-	if providerType != constants.PaymentProviderOfficial || channelType != constants.PaymentChannelTypePaypal {
+	if strings.ToLower(strings.TrimSpace(channel.ProviderType)) != constants.PaymentProviderDujiaoPay {
 		log.Warnw("payment_webhook_provider_mismatch",
 			"provider_type", channel.ProviderType,
 			"channel_type", channel.ChannelType,
@@ -48,602 +141,276 @@ func (s *PaymentService) HandlePaypalWebhook(input WebhookCallbackInput) (*model
 		return nil, "", ErrPaymentProviderNotSupported
 	}
 
-	cfg, err := paypal.ParseConfig(channel.ConfigJSON)
+	result, err := s.tryParseWebhookWithChannel(channel, input)
 	if err != nil {
-		log.Warnw("payment_webhook_config_parse_failed", "error", err)
-		return nil, "", fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
+		log.Warnw("payment_webhook_parse_failed", "error", err)
+		return nil, "", err
 	}
-	if err := paypal.ValidateConfig(cfg); err != nil {
-		log.Warnw("payment_webhook_config_invalid", "error", err)
-		return nil, "", fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
+	return s.commitVerifiedWebhook(channel, result, log)
+}
+
+// handleWebhookViaRegistry 通过 Registry 路由 webhook 解析。
+//
+// channel_id 在 URL query 缺失时:
+//   - 微信不允许 notify_url 携带 query 参数(微信官方 V3 规范),wechat webhook
+//     必须支持遍历候选 channel,逐个用 api_v3_key 尝试 AES-GCM 解密验签;
+//   - stripe 的 endpoint_secret 也具备同等的"试错验签"能力,顺带支持;
+//   - paypal 的 webhook_id 校验缺乏自识别机制,必须强制 channel_id。
+func (s *PaymentService) handleWebhookViaRegistry(
+	input WebhookCallbackInput,
+	expectedProviderType string,
+	expectedChannelType string,
+) (*models.Payment, string, error) {
+	log := paymentLogger(
+		"provider", expectedChannelType,
+		"channel_id", input.ChannelID,
+		"body_size", len(input.Body),
+	)
+
+	if input.ChannelID == 0 {
+		if !supportsBlindWebhookCandidateMatching(expectedChannelType) {
+			log.Warnw("payment_webhook_invalid_channel_id")
+			return nil, "", ErrPaymentInvalid
+		}
+		return s.handleWebhookByCandidateIteration(input, expectedProviderType, expectedChannelType, log)
 	}
 
-	event, err := paypal.ParseWebhookEvent(input.Body)
+	channel, err := s.channelRepo.GetByID(input.ChannelID)
 	if err != nil {
-		log.Warnw("payment_webhook_payload_invalid", "error", err)
-		return nil, "", ErrPaymentGatewayResponseInvalid
+		log.Errorw("payment_webhook_channel_fetch_failed", "error", err)
+		return nil, "", ErrPaymentUpdateFailed
 	}
-	log.Infow("payment_webhook_event_parsed",
-		"event_type", event.EventType,
-		"event_id", event.ID,
-	)
+	if channel == nil {
+		log.Warnw("payment_webhook_channel_not_found")
+		return nil, "", ErrPaymentChannelNotFound
+	}
+
+	providerType := strings.ToLower(strings.TrimSpace(channel.ProviderType))
+	channelType := strings.ToLower(strings.TrimSpace(channel.ChannelType))
+	if providerType != expectedProviderType || channelType != expectedChannelType {
+		log.Warnw("payment_webhook_provider_mismatch",
+			"provider_type", channel.ProviderType,
+			"channel_type", channel.ChannelType,
+		)
+		return nil, "", ErrPaymentProviderNotSupported
+	}
+
+	result, err := s.tryParseWebhookWithChannel(channel, input)
+	if err != nil {
+		log.Warnw("payment_webhook_parse_failed", "error", err)
+		return nil, "", err
+	}
+	return s.commitVerifiedWebhook(channel, result, log)
+}
+
+// handleWebhookByCandidateIteration 在 channel_id 缺失时,按 expectedProvider+expectedChannel
+// 拉取所有 active channel,挨个尝试解密验签;首个 ParseWebhook 成功的渠道即为目标渠道。
+func (s *PaymentService) handleWebhookByCandidateIteration(
+	input WebhookCallbackInput,
+	expectedProviderType string,
+	expectedChannelType string,
+	log *zap.SugaredLogger,
+) (*models.Payment, string, error) {
+	candidates, _, err := s.channelRepo.List(repository.PaymentChannelListFilter{
+		ProviderType: expectedProviderType,
+		ChannelType:  expectedChannelType,
+		ActiveOnly:   true,
+	})
+	if err != nil {
+		log.Errorw("payment_webhook_candidates_list_failed", "error", err)
+		return nil, "", ErrPaymentUpdateFailed
+	}
+	if len(candidates) == 0 {
+		log.Warnw("payment_webhook_no_candidate_channel")
+		return nil, "", ErrPaymentChannelNotFound
+	}
+
+	var lastErr error
+	for i := range candidates {
+		channel := candidates[i]
+		result, err := s.tryParseWebhookWithChannel(&channel, input)
+		if err != nil {
+			log.Debugw("payment_webhook_candidate_parse_failed",
+				"candidate_channel_id", channel.ID,
+				"error", err,
+			)
+			lastErr = err
+			continue
+		}
+		log.Infow("payment_webhook_candidate_matched", "candidate_channel_id", channel.ID)
+		return s.commitVerifiedWebhook(&channel, result, log)
+	}
+	if lastErr == nil {
+		lastErr = ErrPaymentProviderNotSupported
+	}
+	log.Warnw("payment_webhook_all_candidates_failed", "candidate_count", len(candidates), "last_error", lastErr)
+	return nil, "", lastErr
+}
+
+// tryParseWebhookWithChannel 用指定 channel 的 config 尝试解析 webhook。
+// 返回 error 表示该 channel 不匹配(签名/密钥校验失败或 capability 缺失),
+// 由 caller 决定 retry 下一个候选还是终止。
+func (s *PaymentService) tryParseWebhookWithChannel(
+	channel *models.PaymentChannel,
+	input WebhookCallbackInput,
+) (*provider.WebhookResult, error) {
+	if s.paymentProviderRegistry == nil {
+		return nil, ErrPaymentProviderNotSupported
+	}
+	p, ok := s.paymentProviderRegistry.Lookup(channel.ProviderType, channel.ChannelType)
+	if !ok {
+		return nil, ErrPaymentProviderNotSupported
+	}
+	webhooker, ok := p.(provider.Webhooker)
+	if !ok {
+		return nil, ErrPaymentProviderNotSupported
+	}
 
 	ctx, cancel := detachOutboundRequestContext(input.Context)
 	defer cancel()
-	headers := make(http.Header)
-	for key, value := range input.Headers {
-		headers.Set(key, value)
-	}
-	if err := paypal.VerifyWebhookSignature(ctx, cfg, headers, event.Raw); err != nil {
-		log.Warnw("payment_webhook_signature_invalid",
-			"event_type", event.EventType,
-			"event_id", event.ID,
-			"error", err,
-		)
-		switch {
-		case errors.Is(err, paypal.ErrConfigInvalid):
-			return nil, event.EventType, fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-		case errors.Is(err, paypal.ErrAuthFailed), errors.Is(err, paypal.ErrRequestFailed):
-			return nil, event.EventType, ErrPaymentGatewayRequestFailed
-		default:
-			return nil, event.EventType, ErrPaymentGatewayResponseInvalid
-		}
-	}
 
-	var payment *models.Payment
-	invoiceID := strings.TrimSpace(event.RelatedInvoiceID())
-	if invoiceID != "" {
-		payment, err = s.paymentRepo.GetByGatewayOrderNo(invoiceID)
-		if err != nil {
-			log.Warnw("payment_webhook_gateway_order_lookup_failed", "invoice_id", invoiceID, "error", err)
-		}
-	}
-	paypalOrderID := strings.TrimSpace(event.RelatedOrderID())
-	if payment == nil && paypalOrderID != "" {
-		payment, err = s.paymentRepo.GetLatestByProviderRef(paypalOrderID)
-		if err != nil {
-			log.Warnw("payment_webhook_provider_ref_lookup_failed", "provider_ref", paypalOrderID, "error", err)
-		}
-	}
-	if payment == nil {
-		log.Infow("payment_webhook_payment_not_found",
-			"provider_ref", paypalOrderID,
-			"event_type", event.EventType,
-			"event_id", event.ID,
-		)
-		return nil, event.EventType, nil
-	}
-
-	status, ok := paypal.ToPaymentStatus(event.EventType, event.ResourceStatus())
-	if !ok {
-		log.Infow("payment_webhook_status_ignored",
-			"payment_id", payment.ID,
-			"provider_ref", paypalOrderID,
-			"event_type", event.EventType,
-			"event_id", event.ID,
-		)
-		return payment, event.EventType, nil
-	}
-
-	amount, amountCurrency, err := buildPaypalCallbackAmount(event, status)
+	result, err := webhooker.ParseWebhook(ctx, channel.ConfigJSON, input.Headers, input.Body, time.Now())
 	if err != nil {
-		log.Warnw("payment_webhook_amount_invalid",
-			"payment_id", payment.ID,
-			"provider_ref", paypalOrderID,
-			"event_type", event.EventType,
-			"event_id", event.ID,
+		return nil, mapProviderErrorToService(err)
+	}
+	return result, nil
+}
+
+// commitVerifiedWebhook 在 ParseWebhook 验签通过(已确认 channel 归属)后,
+// 反查 payment 并落库。任何错误都是真实的业务/DB 错误,不再 retry 其他 channel。
+func (s *PaymentService) commitVerifiedWebhook(
+	channel *models.PaymentChannel,
+	result *provider.WebhookResult,
+	log *zap.SugaredLogger,
+) (*models.Payment, string, error) {
+	log.Infow("payment_webhook_parsed",
+		"channel_id", channel.ID,
+		"order_no", result.OrderNo,
+		"provider_ref", result.ProviderRef,
+		"status", result.Status,
+	)
+
+	// status 为空表示 adapter 判断该事件无需处理（不可识别的事件类型），直接忽略。
+	if result.Status == "" {
+		log.Infow("payment_webhook_status_ignored",
+			"channel_id", channel.ID,
+			"order_no", result.OrderNo,
+			"provider_ref", result.ProviderRef,
+		)
+		return nil, "", nil
+	}
+
+	payment, err := s.findWebhookPayment(channel.ID, result)
+	if err != nil {
+		if errors.Is(err, ErrPaymentNotFound) {
+			log.Infow("payment_webhook_payment_not_found",
+				"channel_id", channel.ID,
+				"order_no", result.OrderNo,
+				"provider_ref", result.ProviderRef,
+				"status", result.Status,
+			)
+			return nil, result.Status, nil
+		}
+		log.Warnw("payment_webhook_payment_lookup_failed",
+			"channel_id", channel.ID,
+			"order_no", result.OrderNo,
+			"provider_ref", result.ProviderRef,
+			"status", result.Status,
 			"error", err,
 		)
-		return nil, event.EventType, err
+		return nil, result.Status, err
 	}
 
-	resourceBytes, _ := json.Marshal(event.Raw)
-	payloadMap := map[string]interface{}{}
-	if len(resourceBytes) > 0 {
-		_ = json.Unmarshal(resourceBytes, &payloadMap)
+	payload := models.JSON{}
+	if result.Payload != nil {
+		payload = result.Payload
 	}
 
-	updated, err := s.HandleCallback(PaymentCallbackInput{
+	callbackInput := PaymentCallbackInput{
 		PaymentID:   payment.ID,
 		ChannelID:   channel.ID,
-		Status:      status,
-		ProviderRef: paypalOrderID,
-		Amount:      amount,
-		Currency:    strings.ToUpper(strings.TrimSpace(amountCurrency)),
-		PaidAt:      event.PaidAt(),
-		Payload:     models.JSON(payloadMap),
-	})
-	if err != nil {
-		log.Errorw("payment_webhook_callback_apply_failed",
-			"payment_id", payment.ID,
-			"provider_ref", paypalOrderID,
-			"event_type", event.EventType,
-			"event_id", event.ID,
-			"error", err,
-		)
-		return nil, event.EventType, err
-	}
-	log.Infow("payment_webhook_processed",
-		"payment_id", updated.ID,
-		"provider_ref", paypalOrderID,
-		"event_type", event.EventType,
-		"event_id", event.ID,
-		"status", updated.Status,
-	)
-	return updated, event.EventType, nil
-}
-
-func buildPaypalCallbackAmount(event *paypal.WebhookEvent, status string) (models.Money, string, error) {
-	amount := models.Money{}
-	if event == nil {
-		return amount, "", ErrPaymentGatewayResponseInvalid
-	}
-
-	amountValue, amountCurrency := event.CaptureAmount()
-	amountValue = strings.TrimSpace(amountValue)
-	amountCurrency = strings.ToUpper(strings.TrimSpace(amountCurrency))
-
-	requiresAmount := strings.EqualFold(strings.TrimSpace(status), constants.PaymentStatusSuccess)
-	if requiresAmount {
-		if amountValue == "" || amountCurrency == "" {
-			return amount, "", ErrPaymentGatewayResponseInvalid
-		}
-	}
-
-	if amountValue == "" {
-		if amountCurrency != "" {
-			return amount, "", ErrPaymentGatewayResponseInvalid
-		}
-		return amount, "", nil
-	}
-
-	parsedAmount, err := decimal.NewFromString(amountValue)
-	if err != nil || parsedAmount.Cmp(decimal.Zero) <= 0 {
-		return amount, "", ErrPaymentGatewayResponseInvalid
-	}
-	if amountCurrency == "" {
-		return amount, "", ErrPaymentGatewayResponseInvalid
-	}
-
-	amount = models.NewMoneyFromDecimal(parsedAmount)
-	return amount, amountCurrency, nil
-}
-
-// HandleWechatWebhook 处理微信支付回调。
-func (s *PaymentService) HandleWechatWebhook(input WebhookCallbackInput) (*models.Payment, string, error) {
-	log := paymentLogger(
-		"provider", constants.PaymentChannelTypeWechat,
-		"channel_id", input.ChannelID,
-		"body_size", len(input.Body),
-	)
-	ctx, cancel := detachOutboundRequestContext(input.Context)
-	defer cancel()
-
-	candidates, err := s.resolveWechatWebhookChannels(input.ChannelID)
-	if err != nil {
-		log.Warnw("payment_webhook_resolve_channels_failed", "error", err)
-		return nil, "", err
-	}
-
-	var lastErr error
-	for i := range candidates {
-		channel := candidates[i]
-		cfg, err := wechatpay.ParseConfig(channel.ConfigJSON)
-		if err != nil {
-			mappedErr := fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			if input.ChannelID != 0 {
-				return nil, "", mappedErr
-			}
-			lastErr = mappedErr
-			continue
-		}
-		if err := wechatpay.ValidateConfig(cfg, channel.InteractionMode); err != nil {
-			mappedErr := fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			if input.ChannelID != 0 {
-				return nil, "", mappedErr
-			}
-			lastErr = mappedErr
-			continue
-		}
-
-		result, err := wechatpay.VerifyAndDecodeWebhook(ctx, cfg, input.Headers, input.Body)
-		if err != nil {
-			mappedErr := mapWechatGatewayError(err)
-			if input.ChannelID != 0 {
-				return nil, "", mappedErr
-			}
-			lastErr = mappedErr
-			continue
-		}
-
-		payment, err := s.findWechatWebhookPayment(channel.ID, result)
-		if err != nil {
-			if errors.Is(err, ErrPaymentNotFound) {
-				log.Infow("payment_webhook_payment_not_found",
-					"channel_id", channel.ID,
-					"event_type", result.EventType,
-					"provider_ref", result.TransactionID,
-					"order_no", result.OrderNo,
-				)
-				return nil, result.EventType, nil
-			}
-			log.Warnw("payment_webhook_payment_lookup_failed",
-				"channel_id", channel.ID,
-				"event_type", result.EventType,
-				"provider_ref", result.TransactionID,
-				"order_no", result.OrderNo,
-				"error", err,
-			)
-			return nil, result.EventType, err
-		}
-		if payment == nil {
-			log.Infow("payment_webhook_payment_not_found",
-				"channel_id", channel.ID,
-				"event_type", result.EventType,
-				"provider_ref", result.TransactionID,
-				"order_no", result.OrderNo,
-			)
-			return nil, result.EventType, nil
-		}
-
-		updated, err := s.handleWechatWebhookCallback(channel.ID, payment, result)
-		if err != nil {
-			log.Warnw("payment_webhook_callback_apply_failed",
-				"channel_id", channel.ID,
-				"payment_id", payment.ID,
-				"event_type", result.EventType,
-				"provider_ref", result.TransactionID,
-				"order_no", result.OrderNo,
-				"error", err,
-			)
-			return nil, result.EventType, err
-		}
-		log.Infow("payment_webhook_processed",
-			"channel_id", channel.ID,
-			"payment_id", updated.ID,
-			"event_type", result.EventType,
-			"provider_ref", result.TransactionID,
-			"order_no", result.OrderNo,
-			"status", updated.Status,
-		)
-		return updated, result.EventType, nil
-	}
-
-	if lastErr != nil {
-		log.Warnw("payment_webhook_verify_failed_all_channels", "error", lastErr)
-		return nil, "", lastErr
-	}
-	log.Warnw("payment_webhook_no_channel_matched")
-	return nil, "", ErrPaymentGatewayResponseInvalid
-}
-
-// HandleStripeWebhook 处理 Stripe webhook。
-func (s *PaymentService) HandleStripeWebhook(input WebhookCallbackInput) (*models.Payment, string, error) {
-	log := paymentLogger(
-		"provider", constants.PaymentChannelTypeStripe,
-		"channel_id", input.ChannelID,
-		"body_size", len(input.Body),
-	)
-	candidates, err := s.resolveStripeWebhookChannels(input.ChannelID)
-	if err != nil {
-		log.Warnw("payment_webhook_resolve_channels_failed", "error", err)
-		return nil, "", err
-	}
-
-	var lastErr error
-	for i := range candidates {
-		channel := candidates[i]
-		cfg, err := stripe.ParseConfig(channel.ConfigJSON)
-		if err != nil {
-			mappedErr := fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			if input.ChannelID != 0 {
-				return nil, "", mappedErr
-			}
-			lastErr = mappedErr
-			continue
-		}
-		if err := stripe.ValidateConfig(cfg); err != nil {
-			mappedErr := fmt.Errorf("%w: %v", ErrPaymentChannelConfigInvalid, err)
-			if input.ChannelID != 0 {
-				return nil, "", mappedErr
-			}
-			lastErr = mappedErr
-			continue
-		}
-
-		result, err := stripe.VerifyAndParseWebhook(cfg, input.Headers, input.Body, time.Now())
-		if err != nil {
-			mappedErr := mapStripeGatewayError(err)
-			if input.ChannelID != 0 {
-				return nil, "", mappedErr
-			}
-			lastErr = mappedErr
-			continue
-		}
-		log.Infow("payment_webhook_event_parsed",
-			"channel_id", channel.ID,
-			"event_type", result.EventType,
-			"event_id", result.EventID,
-			"provider_ref", result.ProviderRef,
-			"order_no", result.OrderNo,
-		)
-
-		payment, err := s.findStripeWebhookPayment(channel.ID, result)
-		if err != nil {
-			if errors.Is(err, ErrPaymentNotFound) {
-				log.Infow("payment_webhook_payment_not_found",
-					"channel_id", channel.ID,
-					"event_type", result.EventType,
-					"event_id", result.EventID,
-					"provider_ref", result.ProviderRef,
-					"order_no", result.OrderNo,
-				)
-				return nil, result.EventType, nil
-			}
-			log.Warnw("payment_webhook_payment_lookup_failed",
-				"channel_id", channel.ID,
-				"event_type", result.EventType,
-				"event_id", result.EventID,
-				"provider_ref", result.ProviderRef,
-				"order_no", result.OrderNo,
-				"error", err,
-			)
-			return nil, result.EventType, err
-		}
-		if payment == nil {
-			log.Infow("payment_webhook_payment_not_found",
-				"channel_id", channel.ID,
-				"event_type", result.EventType,
-				"event_id", result.EventID,
-				"provider_ref", result.ProviderRef,
-				"order_no", result.OrderNo,
-			)
-			return nil, result.EventType, nil
-		}
-
-		updated, err := s.handleStripeWebhookCallback(channel.ID, payment, result)
-		if err != nil {
-			log.Warnw("payment_webhook_callback_apply_failed",
-				"channel_id", channel.ID,
-				"payment_id", payment.ID,
-				"event_type", result.EventType,
-				"event_id", result.EventID,
-				"provider_ref", result.ProviderRef,
-				"order_no", result.OrderNo,
-				"error", err,
-			)
-			return nil, result.EventType, err
-		}
-		log.Infow("payment_webhook_processed",
-			"channel_id", channel.ID,
-			"payment_id", updated.ID,
-			"event_type", result.EventType,
-			"event_id", result.EventID,
-			"provider_ref", result.ProviderRef,
-			"order_no", result.OrderNo,
-			"status", updated.Status,
-		)
-		return updated, result.EventType, nil
-	}
-
-	if lastErr != nil {
-		log.Warnw("payment_webhook_verify_failed_all_channels", "error", lastErr)
-		return nil, "", lastErr
-	}
-	log.Warnw("payment_webhook_no_channel_matched")
-	return nil, "", ErrPaymentGatewayResponseInvalid
-}
-
-func (s *PaymentService) resolveStripeWebhookChannels(channelID uint) ([]models.PaymentChannel, error) {
-	if channelID != 0 {
-		channel, err := s.channelRepo.GetByID(channelID)
-		if err != nil {
-			return nil, ErrPaymentUpdateFailed
-		}
-		if channel == nil {
-			return nil, ErrPaymentChannelNotFound
-		}
-		providerType := strings.ToLower(strings.TrimSpace(channel.ProviderType))
-		channelType := strings.ToLower(strings.TrimSpace(channel.ChannelType))
-		if providerType != constants.PaymentProviderOfficial || channelType != constants.PaymentChannelTypeStripe {
-			return nil, ErrPaymentProviderNotSupported
-		}
-		return []models.PaymentChannel{*channel}, nil
-	}
-
-	channels, _, err := s.channelRepo.List(repository.PaymentChannelListFilter{
-		ProviderType: constants.PaymentProviderOfficial,
-		ChannelType:  constants.PaymentChannelTypeStripe,
-		ActiveOnly:   true,
-	})
-	if err != nil {
-		return nil, ErrPaymentUpdateFailed
-	}
-	if len(channels) == 0 {
-		return nil, ErrPaymentChannelNotFound
-	}
-	return channels, nil
-}
-
-func (s *PaymentService) findStripeWebhookPayment(channelID uint, result *stripe.WebhookResult) (*models.Payment, error) {
-	if result == nil {
-		return nil, ErrPaymentInvalid
-	}
-	if orderNo := strings.TrimSpace(result.OrderNo); orderNo != "" {
-		payment, err := s.paymentRepo.GetByGatewayOrderNo(orderNo)
-		if err != nil {
-			return nil, ErrPaymentUpdateFailed
-		}
-		if payment != nil && payment.ChannelID == channelID {
-			return payment, nil
-		}
-	}
-	for _, ref := range []string{
-		strings.TrimSpace(result.ProviderRef),
-		strings.TrimSpace(result.SessionID),
-		strings.TrimSpace(result.PaymentIntentID),
-	} {
-		if ref == "" {
-			continue
-		}
-		payment, err := s.paymentRepo.GetLatestByProviderRef(ref)
-		if err != nil {
-			return nil, ErrPaymentUpdateFailed
-		}
-		if payment == nil {
-			continue
-		}
-		if payment.ChannelID != channelID {
-			continue
-		}
-		return payment, nil
-	}
-	return nil, ErrPaymentNotFound
-}
-
-func (s *PaymentService) handleStripeWebhookCallback(channelID uint, payment *models.Payment, result *stripe.WebhookResult) (*models.Payment, error) {
-	if payment == nil || result == nil {
-		return nil, ErrPaymentInvalid
-	}
-	amount := models.Money{}
-	if strings.TrimSpace(result.Amount) != "" {
-		parsed, err := decimal.NewFromString(strings.TrimSpace(result.Amount))
-		if err == nil {
-			amount = models.NewMoneyFromDecimal(parsed)
-		}
-	}
-	payload := models.JSON{}
-	if result.Raw != nil {
-		payload = models.JSON(result.Raw)
-	}
-	status := strings.TrimSpace(result.Status)
-	if status == "" {
-		status = constants.PaymentStatusPending
-	}
-	callbackInput := PaymentCallbackInput{
-		PaymentID: payment.ID,
-		ChannelID: channelID,
-		Status:    status,
-		ProviderRef: pickFirstNonEmpty(
-			strings.TrimSpace(result.ProviderRef),
-			strings.TrimSpace(result.SessionID),
-			strings.TrimSpace(result.PaymentIntentID),
-			strings.TrimSpace(payment.ProviderRef),
-		),
-		Amount:   amount,
-		Currency: strings.ToUpper(strings.TrimSpace(result.Currency)),
-		PaidAt:   result.PaidAt,
-		Payload:  payload,
-	}
-	return s.HandleCallback(callbackInput)
-}
-
-func (s *PaymentService) resolveWechatWebhookChannels(channelID uint) ([]models.PaymentChannel, error) {
-	if channelID != 0 {
-		channel, err := s.channelRepo.GetByID(channelID)
-		if err != nil {
-			return nil, ErrPaymentUpdateFailed
-		}
-		if channel == nil {
-			return nil, ErrPaymentChannelNotFound
-		}
-		providerType := strings.ToLower(strings.TrimSpace(channel.ProviderType))
-		channelType := strings.ToLower(strings.TrimSpace(channel.ChannelType))
-		if providerType != constants.PaymentProviderOfficial || channelType != constants.PaymentChannelTypeWechat {
-			return nil, ErrPaymentProviderNotSupported
-		}
-		return []models.PaymentChannel{*channel}, nil
-	}
-
-	channels, _, err := s.channelRepo.List(repository.PaymentChannelListFilter{
-		ProviderType: constants.PaymentProviderOfficial,
-		ChannelType:  constants.PaymentChannelTypeWechat,
-		ActiveOnly:   true,
-	})
-	if err != nil {
-		return nil, ErrPaymentUpdateFailed
-	}
-	if len(channels) == 0 {
-		return nil, ErrPaymentChannelNotFound
-	}
-	return channels, nil
-}
-
-func (s *PaymentService) findWechatWebhookPayment(channelID uint, result *wechatpay.WebhookResult) (*models.Payment, error) {
-	if result == nil {
-		return nil, ErrPaymentInvalid
-	}
-	if orderNo := strings.TrimSpace(result.OrderNo); orderNo != "" {
-		payment, err := s.paymentRepo.GetByGatewayOrderNo(orderNo)
-		if err != nil {
-			return nil, ErrPaymentUpdateFailed
-		}
-		if payment != nil && payment.ChannelID == channelID {
-			return payment, nil
-		}
-	}
-	if txID := strings.TrimSpace(result.TransactionID); txID != "" {
-		payment, err := s.paymentRepo.GetLatestByProviderRef(txID)
-		if err != nil {
-			return nil, ErrPaymentUpdateFailed
-		}
-		if payment != nil && payment.ChannelID == channelID {
-			return payment, nil
-		}
-	}
-	return nil, ErrPaymentNotFound
-}
-
-func (s *PaymentService) handleWechatWebhookCallback(channelID uint, payment *models.Payment, result *wechatpay.WebhookResult) (*models.Payment, error) {
-	if payment == nil || result == nil {
-		return nil, ErrPaymentInvalid
-	}
-	amount := models.Money{}
-	if strings.TrimSpace(result.Amount) != "" {
-		parsed, err := decimal.NewFromString(strings.TrimSpace(result.Amount))
-		if err == nil {
-			amount = models.NewMoneyFromDecimal(parsed)
-		}
-	}
-	payload := models.JSON{}
-	if result.Raw != nil {
-		payload = models.JSON(result.Raw)
-	}
-	callbackInput := PaymentCallbackInput{
-		PaymentID:   payment.ID,
-		ChannelID:   channelID,
-		Status:      strings.TrimSpace(result.Status),
-		ProviderRef: pickFirstNonEmpty(strings.TrimSpace(result.TransactionID), strings.TrimSpace(payment.ProviderRef)),
-		Amount:      amount,
+		Status:      result.Status,
+		ProviderRef: pickFirstNonEmpty(result.ProviderRef, payment.ProviderRef),
+		Amount:      result.Amount,
 		Currency:    strings.ToUpper(strings.TrimSpace(result.Currency)),
 		PaidAt:      result.PaidAt,
 		Payload:     payload,
 	}
-	return s.HandleCallback(callbackInput)
+
+	updated, err := s.HandleCallback(callbackInput)
+	if err != nil {
+		log.Errorw("payment_webhook_callback_apply_failed",
+			"channel_id", channel.ID,
+			"payment_id", payment.ID,
+			"order_no", result.OrderNo,
+			"provider_ref", result.ProviderRef,
+			"status", result.Status,
+			"error", err,
+		)
+		return nil, result.Status, err
+	}
+	log.Infow("payment_webhook_processed",
+		"channel_id", channel.ID,
+		"payment_id", updated.ID,
+		"order_no", result.OrderNo,
+		"provider_ref", result.ProviderRef,
+		"status", updated.Status,
+	)
+	return updated, result.Status, nil
 }
 
-func mapWechatGatewayError(err error) error {
-	switch {
-	case errors.Is(err, wechatpay.ErrConfigInvalid):
-		return ErrPaymentChannelConfigInvalid
-	case errors.Is(err, wechatpay.ErrRequestFailed):
-		return ErrPaymentGatewayRequestFailed
-	case errors.Is(err, wechatpay.ErrSignatureInvalid), errors.Is(err, wechatpay.ErrResponseInvalid):
-		return ErrPaymentGatewayResponseInvalid
+// supportsBlindWebhookCandidateMatching 标识哪些 channel_type 的 webhook 验签
+// 具备"用任意 channel 的 config 试错即可确认归属"的能力。
+//
+// 微信(api_v3_key + AES-GCM auth tag)和 stripe(endpoint_secret + HMAC)
+// 都满足:错配的密钥会在解密/验签阶段失败,正确的密钥才能成功;
+// paypal 的 webhook 验签依赖 webhook_id 字段语义,无法盲匹配。
+func supportsBlindWebhookCandidateMatching(channelType string) bool {
+	switch strings.ToLower(strings.TrimSpace(channelType)) {
+	case constants.PaymentChannelTypeWechat, constants.PaymentChannelTypeStripe:
+		return true
 	default:
-		return ErrPaymentGatewayRequestFailed
+		return false
 	}
 }
 
-func mapStripeGatewayError(err error) error {
-	switch {
-	case errors.Is(err, stripe.ErrConfigInvalid):
-		return ErrPaymentChannelConfigInvalid
-	case errors.Is(err, stripe.ErrRequestFailed):
-		return ErrPaymentGatewayRequestFailed
-	case errors.Is(err, stripe.ErrSignatureInvalid), errors.Is(err, stripe.ErrResponseInvalid):
-		return ErrPaymentGatewayResponseInvalid
-	default:
-		return ErrPaymentGatewayRequestFailed
+// findWebhookPayment 通过 webhook result 反查 payment。
+// 优先用 OrderNo（= GatewayOrderNo，商户单号），次选 ProviderRef（网关流水号）。
+func (s *PaymentService) findWebhookPayment(channelID uint, result *provider.WebhookResult) (*models.Payment, error) {
+	if result == nil {
+		return nil, ErrPaymentNotFound
 	}
+	if orderNo := strings.TrimSpace(result.OrderNo); orderNo != "" {
+		payment, err := s.paymentRepo.GetByGatewayOrderNo(orderNo)
+		if err == nil && payment != nil && payment.ChannelID == channelID {
+			return payment, nil
+		}
+	}
+	if providerRef := strings.TrimSpace(result.ProviderRef); providerRef != "" {
+		payment, err := s.paymentRepo.GetLatestByProviderRef(providerRef)
+		if err == nil && payment != nil && payment.ChannelID == channelID {
+			return payment, nil
+		}
+	}
+	return nil, ErrPaymentNotFound
+}
+
+// HandleWechatWebhook 处理微信支付回调。
+// P1.2c Task 6: 退化为 thin wrapper，通过 handleWebhookViaRegistry 路由解析。
+func (s *PaymentService) HandleWechatWebhook(input WebhookCallbackInput) (*models.Payment, string, error) {
+	return s.handleWebhookViaRegistry(
+		input,
+		constants.PaymentProviderOfficial,
+		constants.PaymentChannelTypeWechat,
+	)
+}
+
+// HandleStripeWebhook 处理 Stripe webhook。
+// P1.2c Task 6: 退化为 thin wrapper，通过 handleWebhookViaRegistry 路由解析。
+func (s *PaymentService) HandleStripeWebhook(input WebhookCallbackInput) (*models.Payment, string, error) {
+	return s.handleWebhookViaRegistry(
+		input,
+		constants.PaymentProviderOfficial,
+		constants.PaymentChannelTypeStripe,
+	)
 }

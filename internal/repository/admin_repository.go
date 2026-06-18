@@ -24,6 +24,9 @@ type AdminRepository interface {
 	UpdateTOTPEnabled(adminID uint, encSecret string, enabledAt time.Time, recoveryCodesJSON string) error
 	UpdateRecoveryCodes(adminID uint, recoveryCodesJSON string) error
 	ClearTOTP(adminID uint) error
+
+	// 密码重置（CLI 运维场景）
+	UpdatePassword(adminID uint, passwordHash string) error
 }
 
 // GormAdminRepository GORM 实现
@@ -147,5 +150,22 @@ func (r *GormAdminRepository) ClearTOTP(adminID uint) error {
 		"recovery_codes":          "",
 		"token_version":           gorm.Expr("token_version + 1"),
 		"token_invalid_before":    now,
+	}).Error
+}
+
+// UpdatePassword 更新管理员密码哈希，TokenVersion++ 强制旧 token 失效
+// 用于 admin-tool CLI 重置密码（超管忘记密码恢复路径）。
+func (r *GormAdminRepository) UpdatePassword(adminID uint, passwordHash string) error {
+	if adminID == 0 {
+		return errors.New("invalid admin id")
+	}
+	if passwordHash == "" {
+		return errors.New("password hash is empty")
+	}
+	now := time.Now()
+	return r.db.Model(&models.Admin{}).Where("id = ?", adminID).Updates(map[string]interface{}{
+		"password_hash":        passwordHash,
+		"token_version":        gorm.Expr("token_version + 1"),
+		"token_invalid_before": now,
 	}).Error
 }

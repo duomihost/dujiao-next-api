@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"strings"
 	"time"
 
@@ -11,35 +10,37 @@ import (
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/logger"
 	"github.com/dujiao-next/internal/models"
+	"github.com/dujiao-next/internal/payment/provider"
 	"github.com/dujiao-next/internal/queue"
 	"github.com/dujiao-next/internal/repository"
 
 	"github.com/shopspring/decimal"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // PaymentService 支付服务
 type PaymentService struct {
-	orderRepo             repository.OrderRepository
-	productRepo           repository.ProductRepository
-	productSKURepo        repository.ProductSKURepository
-	paymentRepo           repository.PaymentRepository
-	channelRepo           repository.PaymentChannelRepository
-	walletRepo            repository.WalletRepository
-	userRepo              repository.UserRepository
-	userOAuthIdentityRepo repository.UserOAuthIdentityRepository
-	queueClient           *queue.Client
-	walletSvc             *WalletService
-	settingService        *SettingService
-	defaultEmailConfig    config.EmailConfig
-	expireMinutes         int
-	affiliateSvc          *AffiliateService
-	notificationSvc       *NotificationService
-	procurementSvc        *ProcurementOrderService
-	downstreamCallbackSvc *DownstreamCallbackService
-	memberLevelSvc        *MemberLevelService
+	orderRepo               repository.OrderRepository
+	productRepo             repository.ProductRepository
+	productSKURepo          repository.ProductSKURepository
+	paymentRepo             repository.PaymentRepository
+	channelRepo             repository.PaymentChannelRepository
+	walletRepo              repository.WalletRepository
+	userRepo                repository.UserRepository
+	userOAuthIdentityRepo   repository.UserOAuthIdentityRepository
+	queueClient             *queue.Client
+	walletSvc               *WalletService
+	settingService          *SettingService
+	defaultEmailConfig      config.EmailConfig
+	expireMinutes           int
+	affiliateSvc            *AffiliateService
+	notificationSvc         *NotificationService
+	procurementSvc          *ProcurementOrderService
+	downstreamCallbackSvc   *DownstreamCallbackService
+	memberLevelSvc          *MemberLevelService
+	paymentProviderRegistry *provider.Registry
+	resellerAccountingSvc   *ResellerAccountingService
 }
 
 // SetProcurementService 设置采购单服务（解决循环依赖）
@@ -59,41 +60,45 @@ func (s *PaymentService) SetMemberLevelService(svc *MemberLevelService) {
 
 // PaymentServiceOptions 支付服务构造参数
 type PaymentServiceOptions struct {
-	OrderRepo             repository.OrderRepository
-	ProductRepo           repository.ProductRepository
-	ProductSKURepo        repository.ProductSKURepository
-	PaymentRepo           repository.PaymentRepository
-	ChannelRepo           repository.PaymentChannelRepository
-	WalletRepo            repository.WalletRepository
-	UserRepo              repository.UserRepository
-	UserOAuthIdentityRepo repository.UserOAuthIdentityRepository
-	QueueClient           *queue.Client
-	WalletService         *WalletService
-	SettingService        *SettingService
-	DefaultEmailConfig    config.EmailConfig
-	ExpireMinutes         int
-	AffiliateService      *AffiliateService
-	NotificationService   *NotificationService
+	OrderRepo                 repository.OrderRepository
+	ProductRepo               repository.ProductRepository
+	ProductSKURepo            repository.ProductSKURepository
+	PaymentRepo               repository.PaymentRepository
+	ChannelRepo               repository.PaymentChannelRepository
+	WalletRepo                repository.WalletRepository
+	UserRepo                  repository.UserRepository
+	UserOAuthIdentityRepo     repository.UserOAuthIdentityRepository
+	QueueClient               *queue.Client
+	WalletService             *WalletService
+	SettingService            *SettingService
+	DefaultEmailConfig        config.EmailConfig
+	ExpireMinutes             int
+	AffiliateService          *AffiliateService
+	NotificationService       *NotificationService
+	PaymentProviderRegistry   *provider.Registry
+	ResellerAccountingService *ResellerAccountingService
 }
 
 // NewPaymentService 创建支付服务
 func NewPaymentService(opts PaymentServiceOptions) *PaymentService {
 	return &PaymentService{
-		orderRepo:             opts.OrderRepo,
-		productRepo:           opts.ProductRepo,
-		productSKURepo:        opts.ProductSKURepo,
-		paymentRepo:           opts.PaymentRepo,
-		channelRepo:           opts.ChannelRepo,
-		walletRepo:            opts.WalletRepo,
-		userRepo:              opts.UserRepo,
-		userOAuthIdentityRepo: opts.UserOAuthIdentityRepo,
-		queueClient:           opts.QueueClient,
-		walletSvc:             opts.WalletService,
-		settingService:        opts.SettingService,
-		defaultEmailConfig:    opts.DefaultEmailConfig,
-		expireMinutes:         opts.ExpireMinutes,
-		affiliateSvc:          opts.AffiliateService,
-		notificationSvc:       opts.NotificationService,
+		orderRepo:               opts.OrderRepo,
+		productRepo:             opts.ProductRepo,
+		productSKURepo:          opts.ProductSKURepo,
+		paymentRepo:             opts.PaymentRepo,
+		channelRepo:             opts.ChannelRepo,
+		walletRepo:              opts.WalletRepo,
+		userRepo:                opts.UserRepo,
+		userOAuthIdentityRepo:   opts.UserOAuthIdentityRepo,
+		queueClient:             opts.QueueClient,
+		walletSvc:               opts.WalletService,
+		settingService:          opts.SettingService,
+		defaultEmailConfig:      opts.DefaultEmailConfig,
+		expireMinutes:           opts.ExpireMinutes,
+		affiliateSvc:            opts.AffiliateService,
+		notificationSvc:         opts.NotificationService,
+		paymentProviderRegistry: opts.PaymentProviderRegistry,
+		resellerAccountingSvc:   opts.ResellerAccountingService,
 	}
 }
 
@@ -221,17 +226,14 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 	}
 
 	err := s.paymentRepo.Transaction(func(tx *gorm.DB) error {
-		var lockedOrder models.Order
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			Preload("Items").
-			Preload("Children").
-			Preload("Children.Items").
-			First(&lockedOrder, input.OrderID).Error; err != nil {
-			if errors.Is(err, gorm.ErrRecordNotFound) {
-				return ErrOrderNotFound
-			}
+		preloaded, err := s.orderRepo.WithTx(tx).GetByIDForUpdateWithChildren(input.OrderID)
+		if err != nil {
 			return ErrOrderFetchFailed
 		}
+		if preloaded == nil {
+			return ErrOrderNotFound
+		}
+		lockedOrder := *preloaded
 		if lockedOrder.ParentID != nil {
 			return ErrPaymentInvalid
 		}
@@ -373,10 +375,10 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 		if err := paymentRepo.Create(payment); err != nil {
 			return ErrPaymentCreateFailed
 		}
-		if err := tx.Model(&models.Order{}).Where("id = ?", lockedOrder.ID).Updates(map[string]interface{}{
+		if err := s.orderRepo.WithTx(tx).UpdateFields(lockedOrder.ID, map[string]interface{}{
 			"online_paid_amount": models.NewMoneyFromDecimal(onlineAmount),
 			"updated_at":         time.Now(),
-		}).Error; err != nil {
+		}); err != nil {
 			return ErrOrderUpdateFailed
 		}
 		lockedOrder.OnlinePaidAmount = models.NewMoneyFromDecimal(onlineAmount)
@@ -442,10 +444,14 @@ func (s *PaymentService) CreatePayment(input CreatePaymentInput) (*CreatePayment
 			if s.walletSvc == nil {
 				return nil
 			}
-			var lockedOrder models.Order
-			if findErr := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&lockedOrder, order.ID).Error; findErr != nil {
+			preloaded, findErr := s.orderRepo.WithTx(tx).GetByIDForUpdate(order.ID)
+			if findErr != nil {
 				return findErr
 			}
+			if preloaded == nil {
+				return ErrOrderNotFound
+			}
+			lockedOrder := *preloaded
 			_, refundErr := s.walletSvc.ReleaseOrderBalance(tx, &lockedOrder, constants.WalletTxnTypeOrderRefund, "在线支付创建失败，退回余额")
 			return refundErr
 		})
@@ -876,6 +882,24 @@ func shouldAutoFulfill(order *models.Order) bool {
 		}
 	}
 	return true
+}
+
+// isOrderFullyAutoFulfill 判断订单是否完全为自动交付。
+// 父订单：所有子订单均满足 shouldAutoFulfill；单订单：自身满足 shouldAutoFulfill。
+// 用于支付成功时跳过"已支付"邮件——自动交付会紧接着发送含卡密内容的"已完成"邮件，避免重复打扰。
+func isOrderFullyAutoFulfill(order *models.Order) bool {
+	if order == nil {
+		return false
+	}
+	if len(order.Children) > 0 {
+		for i := range order.Children {
+			if !shouldAutoFulfill(&order.Children[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	return shouldAutoFulfill(order)
 }
 
 func buildOrderSubject(order *models.Order) string {

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -101,9 +100,7 @@ func (h *Handler) GenerateGiftCards(c *gin.Context) {
 
 // GetGiftCards 获取礼品卡列表
 func (h *Handler) GetGiftCards(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	status := strings.TrimSpace(strings.ToLower(c.Query("status")))
 	code := strings.TrimSpace(c.Query("code"))
@@ -119,32 +116,17 @@ func (h *Handler) GetGiftCards(c *gin.Context) {
 		redeemedUserID = parsed
 	}
 
-	createdFrom, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("created_from")))
+	createdFrom, createdTo, err := shared.ParseQueryTimeRange(c, "created_from", "created_to")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
 	}
-	createdTo, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("created_to")))
+	redeemedFrom, redeemedTo, err := shared.ParseQueryTimeRange(c, "redeemed_from", "redeemed_to")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
 	}
-	redeemedFrom, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("redeemed_from")))
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
-	redeemedTo, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("redeemed_to")))
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
-	expiresFrom, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("expires_from")))
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
-	expiresTo, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("expires_to")))
+	expiresFrom, expiresTo, err := shared.ParseQueryTimeRange(c, "expires_from", "expires_to")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return

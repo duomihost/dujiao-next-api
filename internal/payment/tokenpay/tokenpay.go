@@ -238,18 +238,6 @@ func ParsePaidAt(raw string) *time.Time {
 	return nil
 }
 
-func ParseAmount(raw string) string {
-	trimmed := strings.TrimSpace(raw)
-	if trimmed == "" {
-		return ""
-	}
-	num, err := strconv.ParseFloat(trimmed, 64)
-	if err != nil {
-		return ""
-	}
-	return strconv.FormatFloat(num, 'f', 2, 64)
-}
-
 func ToPaymentStatus(status int) string {
 	switch status {
 	case 1:

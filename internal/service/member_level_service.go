@@ -12,6 +12,7 @@ import (
 var (
 	ErrMemberLevelNotFound      = errors.New("member_level_not_found")
 	ErrMemberLevelSlugExists    = errors.New("member_level_slug_exists")
+	ErrMemberLevelSortOrderUsed = errors.New("member_level_sort_order_used")
 	ErrMemberLevelDeleteDefault = errors.New("member_level_cannot_delete_default")
 )
 
@@ -57,6 +58,9 @@ func (s *MemberLevelService) CreateLevel(level *models.MemberLevel) error {
 	if existing != nil {
 		return ErrMemberLevelSlugExists
 	}
+	if err := s.ensureActiveSortOrderAvailable(level); err != nil {
+		return err
+	}
 	if level.IsDefault {
 		if err := s.levelRepo.ClearDefault(0); err != nil {
 			return err
@@ -73,12 +77,29 @@ func (s *MemberLevelService) UpdateLevel(level *models.MemberLevel) error {
 	if existing != nil && existing.ID != level.ID {
 		return ErrMemberLevelSlugExists
 	}
+	if err := s.ensureActiveSortOrderAvailable(level); err != nil {
+		return err
+	}
 	if level.IsDefault {
 		if err := s.levelRepo.ClearDefault(level.ID); err != nil {
 			return err
 		}
 	}
 	return s.levelRepo.Update(level)
+}
+
+func (s *MemberLevelService) ensureActiveSortOrderAvailable(level *models.MemberLevel) error {
+	if level == nil || !level.IsActive {
+		return nil
+	}
+	existing, err := s.levelRepo.GetActiveBySortOrder(level.SortOrder, level.ID)
+	if err != nil {
+		return err
+	}
+	if existing != nil {
+		return ErrMemberLevelSortOrderUsed
+	}
+	return nil
 }
 
 func (s *MemberLevelService) DeleteLevel(id uint) error {
@@ -184,41 +205,73 @@ func (s *MemberLevelService) ResolveMemberPriceForProducts(levelID uint, product
 
 // CheckAndUpgrade 检查用户是否满足升级条件，只升不降
 func (s *MemberLevelService) CheckAndUpgrade(userID uint) error {
-	user, err := s.userRepo.GetByID(userID)
-	if err != nil || user == nil {
-		return err
-	}
-
-	levels, err := s.levelRepo.ListAllActive()
-	if err != nil {
-		return err
-	}
-	if len(levels) == 0 {
-		return nil
-	}
-
-	// levels 已按 sort_order DESC 排列，取首个满足条件且高于当前等级的
-	var currentSortOrder int
-	for _, l := range levels {
-		if l.ID == user.MemberLevelID {
-			currentSortOrder = l.SortOrder
-			break
+	const maxUpgradeAttempts = 3
+	for attempt := 0; attempt < maxUpgradeAttempts; attempt++ {
+		user, err := s.userRepo.GetByID(userID)
+		if err != nil || user == nil {
+			return err
 		}
-	}
 
-	for _, level := range levels {
-		if level.SortOrder < currentSortOrder {
-			continue
+		levels, err := s.levelRepo.ListAllActive()
+		if err != nil {
+			return err
 		}
-		if level.ID == user.MemberLevelID {
-			continue
+		if len(levels) == 0 {
+			return nil
 		}
-		if s.meetsThreshold(user, &level) {
-			user.MemberLevelID = level.ID
-			return s.userRepo.Update(user)
+
+		target, err := s.findUpgradeTarget(user, levels)
+		if err != nil || target == nil {
+			return err
+		}
+		affected, err := s.userRepo.UpdateMemberLevelIfCurrent(user.ID, user.MemberLevelID, target.ID)
+		if err != nil {
+			return err
+		}
+		if affected > 0 {
+			return nil
 		}
 	}
 	return nil
+}
+
+func (s *MemberLevelService) findUpgradeTarget(user *models.User, levels []models.MemberLevel) (*models.MemberLevel, error) {
+	if user == nil {
+		return nil, nil
+	}
+	currentSortOrder, ok, err := s.resolveCurrentSortOrder(user.MemberLevelID, levels)
+	if err != nil || !ok {
+		return nil, err
+	}
+	for i := range levels {
+		level := &levels[i]
+		if level.ID == user.MemberLevelID {
+			continue
+		}
+		if level.SortOrder <= currentSortOrder {
+			continue
+		}
+		if s.meetsThreshold(user, level) {
+			return level, nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *MemberLevelService) resolveCurrentSortOrder(levelID uint, activeLevels []models.MemberLevel) (int, bool, error) {
+	if levelID == 0 {
+		return -1 << 60, true, nil
+	}
+	for _, level := range activeLevels {
+		if level.ID == levelID {
+			return level.SortOrder, true, nil
+		}
+	}
+	level, err := s.levelRepo.GetByID(levelID)
+	if err != nil || level == nil {
+		return 0, false, err
+	}
+	return level.SortOrder, true, nil
 }
 
 // meetsThreshold 判断用户是否满足等级阈值（充值累计 OR 消费累计）
@@ -239,12 +292,10 @@ func (s *MemberLevelService) meetsThreshold(user *models.User, level *models.Mem
 
 // OnRechargeCompleted 充值到账后触发
 func (s *MemberLevelService) OnRechargeCompleted(userID uint, amount decimal.Decimal) error {
-	user, err := s.userRepo.GetByID(userID)
-	if err != nil || user == nil {
-		return err
+	if userID == 0 {
+		return nil
 	}
-	user.TotalRecharged = models.NewMoneyFromDecimal(user.TotalRecharged.Decimal.Add(amount))
-	if err := s.userRepo.Update(user); err != nil {
+	if err := s.userRepo.IncrementTotalRecharged(userID, amount); err != nil {
 		return err
 	}
 	return s.CheckAndUpgrade(userID)
@@ -255,12 +306,7 @@ func (s *MemberLevelService) OnOrderPaid(userID uint, amount decimal.Decimal) er
 	if userID == 0 {
 		return nil
 	}
-	user, err := s.userRepo.GetByID(userID)
-	if err != nil || user == nil {
-		return err
-	}
-	user.TotalSpent = models.NewMoneyFromDecimal(user.TotalSpent.Decimal.Add(amount))
-	if err := s.userRepo.Update(user); err != nil {
+	if err := s.userRepo.IncrementTotalSpent(userID, amount); err != nil {
 		return err
 	}
 	return s.CheckAndUpgrade(userID)

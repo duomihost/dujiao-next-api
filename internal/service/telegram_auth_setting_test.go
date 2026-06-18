@@ -95,3 +95,80 @@ func TestValidateTelegramAuthSetting(t *testing.T) {
 func ptrInt(value int) *int {
 	return &value
 }
+
+func TestTelegramLoginModeDetection(t *testing.T) {
+	cases := []struct {
+		name    string
+		setting TelegramAuthSetting
+		want    TelegramLoginMode
+	}{
+		{"disabled", TelegramAuthSetting{Enabled: false, BotToken: "1:abc", ClientSecret: "s", OIDCRedirectURI: "https://x/cb"}, TelegramLoginModeDisabled},
+		{"widget", TelegramAuthSetting{Enabled: true, BotUsername: "bot", BotToken: "1:abc"}, TelegramLoginModeWidget},
+		{"oidc", TelegramAuthSetting{Enabled: true, BotUsername: "bot", BotToken: "123:abc", ClientSecret: "s", OIDCRedirectURI: "https://x/cb"}, TelegramLoginModeOIDC},
+		{"oidc-missing-redirect-falls-back-widget", TelegramAuthSetting{Enabled: true, BotUsername: "bot", BotToken: "1:abc", ClientSecret: "s"}, TelegramLoginModeWidget},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ResolveTelegramLoginMode(NormalizeTelegramAuthSetting(tc.setting)); got != tc.want {
+				t.Fatalf("mode = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTelegramAuthSettingMaskIncludesOIDC(t *testing.T) {
+	masked := MaskTelegramAuthSettingForAdmin(NormalizeTelegramAuthSetting(TelegramAuthSetting{
+		Enabled: true, BotUsername: "bot", BotToken: "123:abc", ClientSecret: "secret", OIDCRedirectURI: "https://x/auth/telegram/callback",
+	}))
+	if masked["client_secret"] != "" {
+		t.Fatalf("client_secret should be masked, got %v", masked["client_secret"])
+	}
+	if masked["has_client_secret"] != true {
+		t.Fatalf("has_client_secret should be true")
+	}
+	if masked["oidc_redirect_uri"] != "https://x/auth/telegram/callback" {
+		t.Fatalf("oidc_redirect_uri mismatch: %v", masked["oidc_redirect_uri"])
+	}
+	if masked["mode"] != string(TelegramLoginModeOIDC) {
+		t.Fatalf("mode = %v, want oidc", masked["mode"])
+	}
+}
+
+func TestValidateTelegramAuthSettingRequiresRedirectWhenSecretSet(t *testing.T) {
+	err := ValidateTelegramAuthSetting(TelegramAuthSetting{Enabled: true, BotUsername: "bot", BotToken: "123:abc", ClientSecret: "secret"})
+	if err == nil {
+		t.Fatalf("expected error when client_secret set without oidc_redirect_uri")
+	}
+}
+
+func TestTelegramAuthSettingPatchClientSecretEmptyKeepsExisting(t *testing.T) {
+	cur := NormalizeTelegramAuthSetting(TelegramAuthSetting{Enabled: true, BotUsername: "bot", BotToken: "123:abc", ClientSecret: "old", OIDCRedirectURI: "https://x/auth/telegram/callback"})
+	empty := ""
+	next := applyTelegramAuthPatch(cur, TelegramAuthSettingPatch{ClientSecret: &empty})
+	if next.ClientSecret != "old" {
+		t.Fatalf("empty client_secret patch should keep existing, got %q", next.ClientSecret)
+	}
+	val := "new"
+	next2 := applyTelegramAuthPatch(cur, TelegramAuthSettingPatch{ClientSecret: &val})
+	if next2.ClientSecret != "new" {
+		t.Fatalf("client_secret should update to new, got %q", next2.ClientSecret)
+	}
+}
+
+func TestTelegramAuthSettingPatchClearingRedirectAlsoClearsClientSecret(t *testing.T) {
+	cur := NormalizeTelegramAuthSetting(TelegramAuthSetting{Enabled: true, BotUsername: "bot", BotToken: "123:abc", ClientSecret: "secret", OIDCRedirectURI: "https://x/auth/telegram/callback"})
+	empty := ""
+	next := applyTelegramAuthPatch(cur, TelegramAuthSettingPatch{OIDCRedirectURI: &empty})
+	if next.OIDCRedirectURI != "" || next.ClientSecret != "" {
+		t.Fatalf("clearing oidc_redirect_uri should also clear client_secret, got redirect=%q secret=%q", next.OIDCRedirectURI, next.ClientSecret)
+	}
+	if err := ValidateTelegramAuthSetting(next); err != nil {
+		t.Fatalf("setting should be valid (widget mode) after clearing, got %v", err)
+	}
+	// 仅更新（非清空）回调地址时 client_secret 保留
+	other := "https://y/auth/telegram/callback"
+	next2 := applyTelegramAuthPatch(cur, TelegramAuthSettingPatch{OIDCRedirectURI: &other})
+	if next2.ClientSecret != "secret" {
+		t.Fatalf("updating (not clearing) redirect should keep client_secret, got %q", next2.ClientSecret)
+	}
+}

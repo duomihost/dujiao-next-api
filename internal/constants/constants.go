@@ -40,12 +40,14 @@ const (
 
 // 支付提供方常量
 const (
-	PaymentProviderOfficial = "official"
-	PaymentProviderEpay     = "epay"
-	PaymentProviderEpusdt   = "epusdt"
-	PaymentProviderOkpay    = "okpay"
-	PaymentProviderTokenpay = "tokenpay"
-	PaymentProviderWallet   = "wallet"
+	PaymentProviderOfficial  = "official"
+	PaymentProviderEpay      = "epay"
+	PaymentProviderEpusdt    = "epusdt"
+	PaymentProviderBepusdt   = "bepusdt"
+	PaymentProviderDujiaoPay = "dujiaopay"
+	PaymentProviderOkpay     = "okpay"
+	PaymentProviderTokenpay  = "tokenpay"
+	PaymentProviderWallet    = "wallet"
 )
 
 // 支付渠道类型常量
@@ -158,9 +160,15 @@ const (
 	AlipayCallbackFail            = "fail"
 )
 
-// EPUSDT 回调常量
+// BEpusdt 回调常量
 const (
-	EpusdtCallbackSuccess = "success"
+	BepusdtCallbackSuccess = "success"
+	BepusdtCallbackFail    = "fail"
+)
+
+// epusdt（GMPay）回调常量
+const (
+	EpusdtCallbackSuccess = "ok"
 	EpusdtCallbackFail    = "fail"
 )
 
@@ -194,6 +202,20 @@ const (
 	ProductStockStatusInStock    = "in_stock"
 	ProductStockStatusLowStock   = "low_stock"
 	ProductStockStatusOutOfStock = "out_of_stock"
+)
+
+// 公开库存展示模式与档位常量
+const (
+	ProductStockDisplayExact  = "exact"
+	ProductStockDisplayStatus = "status"
+	ProductStockDisplayRange  = "range"
+	ProductStockDisplayHidden = "hidden"
+
+	ProductStockDisplayRange1To5    = "range_1_5"
+	ProductStockDisplayRange6To20   = "range_6_20"
+	ProductStockDisplayRange21To50  = "range_21_50"
+	ProductStockDisplayRange51To100 = "range_51_100"
+	ProductStockDisplayRange100Plus = "range_100_plus"
 )
 
 // 手动库存常量
@@ -317,6 +339,7 @@ const (
 	TaskWalletRechargeExpire        = "wallet_recharge:timeout_expire"
 	TaskNotificationDispatch        = "notification:dispatch"
 	TaskAffiliateConfirmCommissions = "affiliate:confirm_commissions"
+	TaskResellerConfirmLedger       = "reseller:confirm_ledger"
 	TaskProcurementSubmit           = "procurement:submit"
 	TaskProcurementPollStatus       = "procurement:poll_status"
 	TaskProcurementSyncAccepted     = "procurement:sync_accepted"
@@ -420,20 +443,30 @@ const (
 	SettingKeyWalletConfig        = "wallet_config"
 	SettingFieldWalletOnlyPayment = "wallet_only_payment"
 
-	SettingKeyRegistrationConfig         = "registration_config"
-	SettingFieldRegistrationEnabled      = "registration_enabled"
-	SettingFieldEmailVerificationEnabled = "email_verification_enabled"
+	SettingKeyRegistrationConfig            = "registration_config"
+	SettingFieldRegistrationEnabled         = "registration_enabled"
+	SettingFieldEmailVerificationEnabled    = "email_verification_enabled"
+	SettingFieldEmailDomainAllowlistEnabled = "email_domain_allowlist_enabled"
+	SettingFieldAllowedEmailDomains         = "allowed_email_domains"
 
 	SettingKeyOrderRiskControlConfig = "order_risk_control_config"
 
+	SettingKeyUpstreamSyncConfig        = "upstream_sync_config"
+	SettingFieldUpstreamSyncIntervalMin = "interval_minutes"
+	SettingFieldUpstreamPreOrderCheck   = "pre_order_stock_check_enabled"
+
 	SettingKeyCallbackRoutesConfig = "callback_routes_config"
-	SettingFieldPaymentCallback    = "payment_callback"
-	SettingFieldPaypalWebhook      = "paypal_webhook"
-	SettingFieldStripeWebhook      = "stripe_webhook"
-	SettingFieldUpstreamCallback   = "upstream_callback"
+
+	SettingKeyHomeAnnouncement   = "home_announcement"
+	SettingFieldPaymentCallback  = "payment_callback"
+	SettingFieldDujiaoPayWebhook = "dujiaopay_webhook"
+	SettingFieldPaypalWebhook    = "paypal_webhook"
+	SettingFieldStripeWebhook    = "stripe_webhook"
+	SettingFieldUpstreamCallback = "upstream_callback"
 
 	// 默认回调路由路径
 	DefaultPaymentCallbackPath  = "/api/v1/payments/callback"
+	DefaultDujiaoPayWebhookPath = "/api/v1/payments/webhook/dujiaopay"
 	DefaultPaypalWebhookPath    = "/api/v1/payments/webhook/paypal"
 	DefaultStripeWebhookPath    = "/api/v1/payments/webhook/stripe"
 	DefaultUpstreamCallbackPath = "/api/v1/upstream/callback"

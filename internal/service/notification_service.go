@@ -547,21 +547,6 @@ func alertTypeLabelByType(locale, alertType string) string {
 	}
 }
 
-func thresholdMessageByAlertType(alertType string) string {
-	switch alertType {
-	case constants.NotificationAlertTypeOutOfStockProducts:
-		return "缺货商品数量达到告警阈值"
-	case constants.NotificationAlertTypeLowStockProducts:
-		return "低库存商品数量触发告警，请及时补货"
-	case constants.NotificationAlertTypePendingOrders:
-		return "待支付订单数量达到告警阈值"
-	case constants.NotificationAlertTypePaymentsFailed:
-		return "支付失败数量达到告警阈值"
-	default:
-		return "触发系统异常告警"
-	}
-}
-
 func isInventoryAlertType(alertType string) bool {
 	switch strings.ToLower(strings.TrimSpace(alertType)) {
 	case constants.NotificationAlertTypeOutOfStockProducts, constants.NotificationAlertTypeLowStockProducts:

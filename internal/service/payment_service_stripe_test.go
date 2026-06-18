@@ -5,13 +5,12 @@ import (
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/models"
-	"github.com/dujiao-next/internal/payment/stripe"
 
 	"github.com/shopspring/decimal"
 )
 
 func TestValidateChannelStripeOfficial(t *testing.T) {
-	svc := &PaymentService{}
+	svc := buildMinimalPaymentServiceWithRegistry(t)
 	channel := &models.PaymentChannel{
 		ProviderType:    constants.PaymentProviderOfficial,
 		ChannelType:     constants.PaymentChannelTypeStripe,
@@ -34,7 +33,7 @@ func TestValidateChannelStripeOfficial(t *testing.T) {
 }
 
 func TestValidateChannelStripeInvalidInteractionMode(t *testing.T) {
-	svc := &PaymentService{}
+	svc := buildMinimalPaymentServiceWithRegistry(t)
 	channel := &models.PaymentChannel{
 		ProviderType:    constants.PaymentProviderOfficial,
 		ChannelType:     constants.PaymentChannelTypeStripe,
@@ -51,20 +50,5 @@ func TestValidateChannelStripeInvalidInteractionMode(t *testing.T) {
 	}
 	if err := svc.ValidateChannel(channel); err == nil {
 		t.Fatalf("expected invalid interaction mode error")
-	}
-}
-
-func TestMapStripeGatewayError(t *testing.T) {
-	if got := mapStripeGatewayError(stripe.ErrConfigInvalid); got != ErrPaymentChannelConfigInvalid {
-		t.Fatalf("expected config invalid mapping, got: %v", got)
-	}
-	if got := mapStripeGatewayError(stripe.ErrRequestFailed); got != ErrPaymentGatewayRequestFailed {
-		t.Fatalf("expected request failed mapping, got: %v", got)
-	}
-	if got := mapStripeGatewayError(stripe.ErrSignatureInvalid); got != ErrPaymentGatewayResponseInvalid {
-		t.Fatalf("expected signature invalid mapping, got: %v", got)
-	}
-	if got := mapStripeGatewayError(stripe.ErrResponseInvalid); got != ErrPaymentGatewayResponseInvalid {
-		t.Fatalf("expected response invalid mapping, got: %v", got)
 	}
 }

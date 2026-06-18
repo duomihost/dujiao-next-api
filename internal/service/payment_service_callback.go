@@ -83,7 +83,7 @@ func (s *PaymentService) HandleCallback(input PaymentCallbackInput) (*models.Pay
 		)
 		return nil, ErrPaymentInvalid
 	}
-	if input.Currency != "" && strings.ToUpper(strings.TrimSpace(input.Currency)) != strings.ToUpper(strings.TrimSpace(payment.Currency)) {
+	if input.Currency != "" && !strings.EqualFold(strings.TrimSpace(input.Currency), strings.TrimSpace(payment.Currency)) {
 		log.Warnw("payment_callback_currency_mismatch",
 			"stored_currency", payment.Currency,
 			"callback_currency", input.Currency,
@@ -176,7 +176,7 @@ func (s *PaymentService) handleWalletRechargeCallback(payment *models.Payment, s
 		)
 		return nil, ErrPaymentInvalid
 	}
-	if input.Currency != "" && strings.ToUpper(strings.TrimSpace(input.Currency)) != strings.ToUpper(strings.TrimSpace(payment.Currency)) {
+	if input.Currency != "" && !strings.EqualFold(strings.TrimSpace(input.Currency), strings.TrimSpace(payment.Currency)) {
 		log.Warnw("wallet_recharge_callback_currency_mismatch",
 			"stored_currency", payment.Currency,
 			"callback_currency", input.Currency,
@@ -403,6 +403,11 @@ func (s *PaymentService) applyPaymentUpdate(payment *models.Payment, order *mode
 			if err := s.markOrderPaid(tx, order, now); err != nil {
 				return err
 			}
+			if s.resellerAccountingSvc != nil {
+				if err := s.resellerAccountingSvc.PostOrderProfitTx(tx, order, payment); err != nil {
+					return err
+				}
+			}
 			orderPaid = true
 		}
 		if (status == constants.PaymentStatusFailed || status == constants.PaymentStatusExpired) && order.Status == constants.OrderStatusPendingPayment && s.walletSvc != nil {
@@ -500,7 +505,8 @@ func (s *PaymentService) enqueueOrderPaidAsync(order *models.Order, payment *mod
 			)
 		}
 	}
-	if s.queueClient != nil {
+	if s.queueClient != nil && !isOrderFullyAutoFulfill(order) {
+		// 完全自动交付的订单会紧接着发送含卡密内容的"已完成"邮件，跳过"已支付"邮件避免重复打扰
 		if _, err := enqueueOrderStatusEmailTaskIfEligible(s.orderRepo, s.queueClient, s.settingService, s.defaultEmailConfig, order.ID, constants.OrderStatusPaid); err != nil {
 			log.Warnw("payment_enqueue_status_email_failed",
 				"order_id", order.ID,

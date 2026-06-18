@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
@@ -25,9 +24,7 @@ type createTelegramBroadcastRequest struct {
 
 // ListTelegramBroadcasts 获取 Telegram 群发列表。
 func (h *Handler) ListTelegramBroadcasts(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	items, total, err := h.TelegramBroadcastService.ListBroadcasts(service.TelegramBroadcastListInput{
 		Page:     page,
@@ -72,12 +69,12 @@ func (h *Handler) CreateTelegramBroadcast(c *gin.Context) {
 
 // GetTelegramBroadcast 获取单条 Telegram 群发详情。
 func (h *Handler) GetTelegramBroadcast(c *gin.Context) {
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil || id == 0 {
+	id, err := shared.ParseParamUint(c, "id")
+	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", errors.New("invalid broadcast id"))
 		return
 	}
-	broadcast, err := h.TelegramBroadcastService.GetBroadcast(uint(id))
+	broadcast, err := h.TelegramBroadcastService.GetBroadcast(id)
 	if err != nil {
 		shared.RespondError(c, response.CodeInternal, "error.bad_request", err)
 		return
@@ -91,16 +88,9 @@ func (h *Handler) GetTelegramBroadcast(c *gin.Context) {
 
 // ListTelegramBroadcastUsers 获取 Telegram 广播可选用户。
 func (h *Handler) ListTelegramBroadcastUsers(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
-	createdFrom, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("created_from")))
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
-	createdTo, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("created_to")))
+	createdFrom, createdTo, err := shared.ParseQueryTimeRange(c, "created_from", "created_to")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return

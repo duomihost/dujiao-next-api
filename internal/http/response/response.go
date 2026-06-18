@@ -92,6 +92,16 @@ func Error(c *gin.Context, statusCode int, msg string) {
 	})
 }
 
+// ErrorWithHTTPStatus 返回真实 HTTP 状态码(非 200),body 仍使用统一 Response 结构。
+// 仅基础设施层(recovery、auth 中间件等异常路径)应使用;业务层继续用 Error。
+func ErrorWithHTTPStatus(c *gin.Context, httpStatus, statusCode int, msg string) {
+	c.AbortWithStatusJSON(httpStatus, Response{
+		StatusCode: statusCode,
+		Msg:        msg,
+		Data:       attachRequestID(c, nil),
+	})
+}
+
 // Unauthorized 401响应
 func Unauthorized(c *gin.Context, msg string) {
 	Error(c, CodeUnauthorized, msg)

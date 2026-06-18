@@ -11,7 +11,6 @@ import (
 
 	"github.com/shopspring/decimal"
 	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
 )
 
 // AdminManualRefundInput 管理员手动退款输入（不处理钱包/支付渠道）
@@ -53,6 +52,7 @@ type OrderRefundService struct {
 	orderRefundRecordRepo repository.OrderRefundRecordRepository
 	affiliateSvc          *AffiliateService
 	settingService        *SettingService
+	resellerAccountingSvc *ResellerAccountingService
 }
 
 // OrderStatusEmailRefundDetails 订单状态邮件中的退款信息
@@ -100,6 +100,10 @@ func NewOrderRefundService(
 		affiliateSvc:          affiliateSvc,
 		settingService:        settingService,
 	}
+}
+
+func (s *OrderRefundService) SetResellerAccountingService(svc *ResellerAccountingService) {
+	s.resellerAccountingSvc = svc
 }
 
 // ParseRefundAmount 解析并校验退款金额。
@@ -234,14 +238,14 @@ func (s *OrderRefundService) AdminManualRefund(input AdminManualRefundInput) (*m
 	}
 
 	if err := s.orderRepo.Transaction(func(tx *gorm.DB) error {
-		var order models.Order
-		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
-			First(&order, input.OrderID).Error; err != nil {
-			if err == gorm.ErrRecordNotFound {
-				return ErrOrderNotFound
-			}
+		locked, err := s.orderRepo.WithTx(tx).GetByIDForUpdate(input.OrderID)
+		if err != nil {
 			return err
 		}
+		if locked == nil {
+			return ErrOrderNotFound
+		}
+		order := *locked
 		if order.PaidAt == nil {
 			return ErrOrderStatusInvalid
 		}
@@ -269,7 +273,7 @@ func (s *OrderRefundService) AdminManualRefund(input AdminManualRefundInput) (*m
 		} else {
 			updates["status"] = constants.OrderStatusPartiallyRefunded
 		}
-		if err := tx.Model(&models.Order{}).Where("id = ?", order.ID).Updates(updates).Error; err != nil {
+		if err := s.orderRepo.WithTx(tx).UpdateFields(order.ID, updates); err != nil {
 			return ErrOrderUpdateFailed
 		}
 		if order.ParentID == nil {
@@ -277,7 +281,7 @@ func (s *OrderRefundService) AdminManualRefund(input AdminManualRefundInput) (*m
 			if markRefunded {
 				targetStatus = constants.OrderStatusRefunded
 			}
-			if err := applyParentRefundChildStatusUpdatesTx(tx, order.ID, targetStatus, now); err != nil {
+			if err := applyParentRefundChildStatusUpdates(s.orderRepo.WithTx(tx), order.ID, targetStatus, now); err != nil {
 				return ErrOrderUpdateFailed
 			}
 		}
@@ -286,6 +290,11 @@ func (s *OrderRefundService) AdminManualRefund(input AdminManualRefundInput) (*m
 				return ErrOrderUpdateFailed
 			}
 		}
+		record, err := s.createRefundRecordTx(tx, &order, constants.OrderRefundTypeManual, amount, recordRemark, now)
+		if err != nil {
+			return err
+		}
+		createdRecord = record
 		if s.affiliateSvc != nil && order.UserID > 0 {
 			if err := s.affiliateSvc.HandleOrderRefundedTx(
 				tx,
@@ -297,11 +306,11 @@ func (s *OrderRefundService) AdminManualRefund(input AdminManualRefundInput) (*m
 				return err
 			}
 		}
-		record, err := s.createRefundRecordTx(tx, &order, constants.OrderRefundTypeManual, amount, recordRemark, now)
-		if err != nil {
-			return err
+		if s.resellerAccountingSvc != nil {
+			if err := s.resellerAccountingSvc.HandleRefundDeductTx(tx, &order, record, refundedBefore); err != nil {
+				return err
+			}
 		}
-		createdRecord = record
 		return nil
 	}); err != nil {
 		return nil, nil, err
@@ -576,13 +585,9 @@ func collectRefundItems(order *models.Order) []models.OrderItem {
 		return nil
 	}
 	result := make([]models.OrderItem, 0, len(order.Items))
-	for i := range order.Items {
-		result = append(result, order.Items[i])
-	}
+	result = append(result, order.Items...)
 	for i := range order.Children {
-		for j := range order.Children[i].Items {
-			result = append(result, order.Children[i].Items[j])
-		}
+		result = append(result, order.Children[i].Items...)
 	}
 	return result
 }

@@ -2,7 +2,6 @@ package admin
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 
 	"github.com/dujiao-next/internal/constants"
@@ -71,9 +70,7 @@ func (h *Handler) GetAdminUserWalletTransactions(c *gin.Context) {
 		shared.RespondError(c, response.CodeBadRequest, "error.user_id_invalid", nil)
 		return
 	}
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	filter := repository.WalletTransactionListFilter{
 		Page:      page,
@@ -93,9 +90,7 @@ func (h *Handler) GetAdminUserWalletTransactions(c *gin.Context) {
 
 // GetAdminWalletRecharges 管理端分页获取钱包充值记录
 func (h *Handler) GetAdminWalletRecharges(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	userID, err := shared.ParseQueryUint(c.Query("user_id"), false)
 	if err != nil {
@@ -112,22 +107,12 @@ func (h *Handler) GetAdminWalletRecharges(c *gin.Context) {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
 	}
-	createdFrom, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("created_from")))
+	createdFrom, createdTo, err := shared.ParseQueryTimeRange(c, "created_from", "created_to")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return
 	}
-	createdTo, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("created_to")))
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
-	paidFrom, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("paid_from")))
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
-	paidTo, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("paid_to")))
+	paidFrom, paidTo, err := shared.ParseQueryTimeRange(c, "paid_from", "paid_to")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return

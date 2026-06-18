@@ -1,7 +1,6 @@
 package admin
 
 import (
-	"strconv"
 	"strings"
 
 	"github.com/dujiao-next/internal/http/handlers/shared"
@@ -13,17 +12,13 @@ import (
 
 // GetUserLoginLogs 获取用户登录日志列表
 func (h *Handler) GetUserLoginLogs(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	userIDRaw := c.Query("user_id")
 	email := strings.TrimSpace(c.Query("email"))
 	status := strings.TrimSpace(c.Query("status"))
 	failReason := strings.TrimSpace(c.Query("fail_reason"))
 	clientIP := strings.TrimSpace(c.Query("client_ip"))
-	createdFromRaw := strings.TrimSpace(c.Query("created_from"))
-	createdToRaw := strings.TrimSpace(c.Query("created_to"))
 
 	var userID uint
 	if userIDRaw != "" {
@@ -35,12 +30,7 @@ func (h *Handler) GetUserLoginLogs(c *gin.Context) {
 		userID = parsedUserID
 	}
 
-	createdFrom, err := shared.ParseTimeNullable(createdFromRaw)
-	if err != nil {
-		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
-		return
-	}
-	createdTo, err := shared.ParseTimeNullable(createdToRaw)
+	createdFrom, createdTo, err := shared.ParseQueryTimeRange(c, "created_from", "created_to")
 	if err != nil {
 		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
 		return

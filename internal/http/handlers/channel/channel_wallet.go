@@ -2,11 +2,11 @@ package channel
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/dto"
+	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/logger"
 	"github.com/dujiao-next/internal/models"
 	"github.com/dujiao-next/internal/repository"
@@ -59,14 +59,7 @@ func (h *Handler) GetWalletTransactions(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "5"))
-	if page < 1 {
-		page = 1
-	}
-	if pageSize < 1 || pageSize > 20 {
-		pageSize = 5
-	}
+	page, pageSize := shared.ParsePaginationWithBounds(c, "page", "page_size", 5, 20)
 
 	userID, err := h.provisionTelegramChannelUserID(service.TelegramChannelIdentityInput{ChannelUserID: channelUserID})
 	if err != nil {
@@ -212,17 +205,34 @@ func (h *Handler) CreateWalletRecharge(c *gin.Context) {
 		return
 	}
 
+	paymentBlock := gin.H{
+		"id":               result.Payment.ID,
+		"amount":           result.Payment.Amount.StringFixed(2),
+		"fee_amount":       result.Payment.FeeAmount.StringFixed(2),
+		"currency":         result.Payment.Currency,
+		"status":           result.Payment.Status,
+		"interaction_mode": result.Payment.InteractionMode,
+		"pay_url":          result.Payment.PayURL,
+		"qr_code":          result.Payment.QRCode,
+		"expires_at":       result.Payment.ExpiredAt,
+	}
+	if info := dto.ExtractCryptoWalletInfo(result.Payment.ProviderType, result.Payment.InteractionMode, result.Payment.ProviderPayload); info.HasAny() {
+		if info.Address != "" {
+			paymentBlock["wallet_address"] = info.Address
+		}
+		if info.ChainAmount != "" {
+			paymentBlock["chain_amount"] = info.ChainAmount
+		}
+		if info.Chain != "" {
+			paymentBlock["chain"] = info.Chain
+		}
+		if info.TokenID != "" {
+			paymentBlock["token_id"] = info.TokenID
+		}
+	}
+
 	respondChannelSuccess(c, gin.H{
 		"recharge_no": result.Recharge.RechargeNo,
-		"payment": gin.H{
-			"id":         result.Payment.ID,
-			"amount":     result.Payment.Amount.StringFixed(2),
-			"fee_amount": result.Payment.FeeAmount.StringFixed(2),
-			"currency":   result.Payment.Currency,
-			"status":     result.Payment.Status,
-			"pay_url":    result.Payment.PayURL,
-			"qr_code":    result.Payment.QRCode,
-			"expires_at": result.Payment.ExpiredAt,
-		},
+		"payment":     paymentBlock,
 	})
 }

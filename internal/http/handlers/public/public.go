@@ -2,7 +2,6 @@ package public
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 	"time"
 
@@ -20,7 +19,6 @@ import (
 )
 
 const (
-	publicConfigCacheKey = "public:config"
 	publicConfigCacheTTL = 60 * time.Second
 	publicLowStockLimit  = 5
 )
@@ -48,19 +46,41 @@ type publicProductView struct {
 	IsSoldOut            bool
 }
 
+type publicStockDisplayView struct {
+	mode           string
+	status         string
+	display        string
+	rangeMin       *int
+	rangeMax       *int
+	quantityHidden bool
+}
+
 // toProductResp 将内部计算结构转换为公共 DTO
 func (v *publicProductView) toProductResp() dto.ProductResp {
+	mode := normalizePublicStockDisplayMode(v.Product.StockDisplayMode)
+	productQuantity := v.productStockQuantity()
+	productDisplay := buildPublicStockDisplay(mode, v.StockStatus, productQuantity)
+
 	skus := make([]dto.SKUResp, 0, len(v.PublicSKUs))
 	for _, sv := range v.PublicSKUs {
+		skuStatus, skuQuantity := v.skuStockState(sv)
+		skuDisplay := buildPublicStockDisplay(mode, skuStatus, skuQuantity)
 		skus = append(skus, dto.SKUResp{
 			ID:                   sv.ID,
 			SKUCode:              sv.SKUCode,
 			SpecValues:           sv.SpecValuesJSON,
 			PriceAmount:          sv.PriceAmount,
-			ManualStockTotal:     sv.ManualStockTotal,
-			ManualStockSold:      sv.ManualStockSold,
-			AutoStockAvailable:   sv.AutoStockAvailable,
-			UpstreamStock:        sv.UpstreamStock,
+			ManualStockTotal:     maskPublicStockInt(mode, sv.ManualStockTotal),
+			ManualStockSold:      maskPublicStockSold(mode, sv.ManualStockSold),
+			AutoStockAvailable:   maskPublicStockInt64(mode, sv.AutoStockAvailable),
+			UpstreamStock:        maskPublicStockInt(mode, sv.UpstreamStock),
+			StockStatus:          skuStatus,
+			StockDisplayMode:     skuDisplay.mode,
+			StockDisplay:         skuDisplay.display,
+			StockRangeMin:        skuDisplay.rangeMin,
+			StockRangeMax:        skuDisplay.rangeMax,
+			StockQuantityHidden:  skuDisplay.quantityHidden,
+			IsSoldOut:            skuStatus == constants.ProductStockStatusOutOfStock,
 			IsActive:             sv.IsActive,
 			PromotionPriceAmount: sv.PromotionPriceAmount,
 			MemberPriceAmount:    sv.MemberPriceAmount,
@@ -76,15 +96,21 @@ func (v *publicProductView) toProductResp() dto.ProductResp {
 		Description:          v.Product.DescriptionJSON,
 		Content:              v.Product.ContentJSON,
 		PriceAmount:          v.Product.PriceAmount,
+		WholesalePrices:      dto.NewWholesalePriceRespList(v.Product.WholesalePrices),
 		Images:               v.Product.Images,
 		Tags:                 v.Product.Tags,
 		PurchaseType:         v.Product.PurchaseType,
 		MinPurchaseQuantity:  v.Product.MinPurchaseQuantity,
 		MaxPurchaseQuantity:  v.Product.MaxPurchaseQuantity,
+		StockDisplayMode:     productDisplay.mode,
+		StockDisplay:         productDisplay.display,
+		StockRangeMin:        productDisplay.rangeMin,
+		StockRangeMax:        productDisplay.rangeMax,
+		StockQuantityHidden:  productDisplay.quantityHidden,
 		FulfillmentType:      v.Product.FulfillmentType,
 		ManualFormSchema:     v.Product.ManualFormSchemaJSON,
-		ManualStockAvailable: v.ManualStockAvailable,
-		AutoStockAvailable:   v.AutoStockAvailable,
+		ManualStockAvailable: maskPublicStockInt(mode, v.ManualStockAvailable),
+		AutoStockAvailable:   maskPublicStockInt64(mode, v.AutoStockAvailable),
 		StockStatus:          v.StockStatus,
 		IsSoldOut:            v.IsSoldOut,
 		PaymentChannelIDs:    service.DecodeChannelIDs(v.Product.PaymentChannelIDs),
@@ -100,6 +126,149 @@ func (v *publicProductView) toProductResp() dto.ProductResp {
 	return resp
 }
 
+func normalizePublicStockDisplayMode(raw string) string {
+	switch strings.TrimSpace(raw) {
+	case constants.ProductStockDisplayStatus:
+		return constants.ProductStockDisplayStatus
+	case constants.ProductStockDisplayRange:
+		return constants.ProductStockDisplayRange
+	case constants.ProductStockDisplayHidden:
+		return constants.ProductStockDisplayHidden
+	default:
+		return constants.ProductStockDisplayExact
+	}
+}
+
+func buildPublicStockDisplay(mode, status string, quantity int64) publicStockDisplayView {
+	normalizedMode := normalizePublicStockDisplayMode(mode)
+	normalizedStatus := normalizePublicStockStatus(status, quantity)
+	view := publicStockDisplayView{
+		mode:           normalizedMode,
+		status:         normalizedStatus,
+		display:        normalizedStatus,
+		quantityHidden: normalizedMode != constants.ProductStockDisplayExact,
+	}
+
+	switch normalizedMode {
+	case constants.ProductStockDisplayRange:
+		if normalizedStatus == constants.ProductStockStatusInStock || normalizedStatus == constants.ProductStockStatusLowStock {
+			view.display, view.rangeMin, view.rangeMax = publicStockRange(quantity)
+		}
+	case constants.ProductStockDisplayHidden:
+		if normalizedStatus == constants.ProductStockStatusInStock || normalizedStatus == constants.ProductStockStatusLowStock {
+			view.display = constants.ProductStockDisplayHidden
+		}
+	case constants.ProductStockDisplayExact:
+		view.quantityHidden = false
+		view.display = constants.ProductStockDisplayExact
+	}
+	return view
+}
+
+func normalizePublicStockStatus(status string, quantity int64) string {
+	switch status {
+	case constants.ProductStockStatusUnlimited:
+		return constants.ProductStockStatusUnlimited
+	case constants.ProductStockStatusOutOfStock:
+		return constants.ProductStockStatusOutOfStock
+	case constants.ProductStockStatusLowStock:
+		return constants.ProductStockStatusLowStock
+	case constants.ProductStockStatusInStock:
+		return constants.ProductStockStatusInStock
+	}
+	switch {
+	case quantity == int64(constants.ManualStockUnlimited):
+		return constants.ProductStockStatusUnlimited
+	case quantity <= 0:
+		return constants.ProductStockStatusOutOfStock
+	case quantity <= publicLowStockLimit:
+		return constants.ProductStockStatusLowStock
+	default:
+		return constants.ProductStockStatusInStock
+	}
+}
+
+func publicStockRange(quantity int64) (string, *int, *int) {
+	switch {
+	case quantity <= 5:
+		min, max := 1, 5
+		return constants.ProductStockDisplayRange1To5, &min, &max
+	case quantity <= 20:
+		min, max := 6, 20
+		return constants.ProductStockDisplayRange6To20, &min, &max
+	case quantity <= 50:
+		min, max := 21, 50
+		return constants.ProductStockDisplayRange21To50, &min, &max
+	case quantity <= 100:
+		min, max := 51, 100
+		return constants.ProductStockDisplayRange51To100, &min, &max
+	default:
+		min := 100
+		return constants.ProductStockDisplayRange100Plus, &min, nil
+	}
+}
+
+func maskPublicStockInt(mode string, value int) int {
+	if normalizePublicStockDisplayMode(mode) == constants.ProductStockDisplayExact {
+		return value
+	}
+	switch {
+	case value == constants.ManualStockUnlimited:
+		return constants.ManualStockUnlimited
+	case value <= 0:
+		return 0
+	default:
+		return 1
+	}
+}
+
+func maskPublicStockInt64(mode string, value int64) int64 {
+	if normalizePublicStockDisplayMode(mode) == constants.ProductStockDisplayExact {
+		return value
+	}
+	switch {
+	case value == int64(constants.ManualStockUnlimited):
+		return int64(constants.ManualStockUnlimited)
+	case value <= 0:
+		return 0
+	default:
+		return 1
+	}
+}
+
+func maskPublicStockSold(mode string, value int) int {
+	if normalizePublicStockDisplayMode(mode) == constants.ProductStockDisplayExact {
+		return value
+	}
+	return 0
+}
+
+func (v *publicProductView) productStockQuantity() int64 {
+	if v.StockStatus == constants.ProductStockStatusUnlimited {
+		return int64(constants.ManualStockUnlimited)
+	}
+	fulfillmentType := strings.TrimSpace(v.Product.FulfillmentType)
+	if fulfillmentType == constants.FulfillmentTypeAuto {
+		return v.AutoStockAvailable
+	}
+	return int64(v.ManualStockAvailable)
+}
+
+func (v *publicProductView) skuStockState(sv publicSKUView) (string, int64) {
+	fulfillmentType := strings.TrimSpace(v.Product.FulfillmentType)
+	if fulfillmentType == "" {
+		fulfillmentType = constants.FulfillmentTypeManual
+	}
+	var quantity int64
+	if fulfillmentType == constants.FulfillmentTypeAuto {
+		quantity = sv.AutoStockAvailable
+	} else {
+		quantity = int64(sv.ManualStockTotal)
+	}
+	status := normalizePublicStockStatus("", quantity)
+	return status, quantity
+}
+
 // GetConfig 获取全局配置
 func (h *Handler) GetConfig(c *gin.Context) {
 	// 默认配置
@@ -113,8 +282,11 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		"scripts": make([]interface{}, 0),
 	}
 
+	tenant, _ := service.TenantFromContext(c.Request.Context())
+	cacheKey := cache.PublicConfigCacheKey(tenant.ResellerID)
+
 	var cached map[string]interface{}
-	if hit, err := cache.GetJSON(c.Request.Context(), publicConfigCacheKey, &cached); err == nil && hit {
+	if hit, err := cache.GetJSON(c.Request.Context(), cacheKey, &cached); err == nil && hit {
 		cached["server_time"] = time.Now().UnixMilli()
 		cached["app_version"] = version.Version
 		response.Success(c, cached)
@@ -183,6 +355,13 @@ func (h *Handler) GetConfig(c *gin.Context) {
 	emailVerificationEnabled, _ := h.SettingService.GetEmailVerificationEnabled(true)
 	data["registration_enabled"] = registrationEnabled
 	data["email_verification_enabled"] = emailVerificationEnabled
+	emailDomainPolicy, policyErr := h.SettingService.GetRegistrationEmailDomainPolicy()
+	if policyErr != nil {
+		shared.RespondError(c, response.CodeInternal, "error.config_fetch_failed", policyErr)
+		return
+	}
+	data["email_domain_allowlist_enabled"] = emailDomainPolicy.Enabled
+	data["allowed_email_domains"] = emailDomainPolicy.AllowedDomains
 
 	// 导航配置
 	navConfigVal, _ := h.SettingService.GetByKey(constants.SettingKeyNavConfig)
@@ -195,7 +374,23 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		}
 	}
 
-	_ = cache.SetJSON(c.Request.Context(), publicConfigCacheKey, data, publicConfigCacheTTL)
+	// 首页公告（仅在启用、处于排期内且内容非空时下发）
+	if announcement, ok := h.SettingService.GetActiveHomeAnnouncement(); ok {
+		data["announcement"] = announcement
+	}
+
+	if h.ResellerSiteConfigService != nil {
+		overlaid, overlayErr := h.ResellerSiteConfigService.ApplyPublicConfigOverlay(c.Request.Context(), tenant, data)
+		if overlayErr != nil {
+			shared.RespondError(c, response.CodeInternal, "error.config_fetch_failed", overlayErr)
+			return
+		}
+		data = overlaid
+	} else if tenant.ResellerID == nil {
+		data["tenant"] = map[string]interface{}{"mode": "main", "host": tenant.Host}
+	}
+
+	_ = cache.SetJSON(c.Request.Context(), cacheKey, data, publicConfigCacheTTL)
 	data["server_time"] = time.Now().UnixMilli()
 	data["app_version"] = version.Version
 	response.Success(c, data)
@@ -229,15 +424,14 @@ func (h *Handler) GetPublicMemberLevels(c *gin.Context) {
 // GetProducts 获取商品列表
 func (h *Handler) GetProducts(c *gin.Context) {
 	// 获取分页参数
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	// 获取筛选参数
 	categoryID := c.Query("category_id")
 	search := strings.TrimSpace(c.Query("search"))
+	tenant := tenantFromRequest(c)
 
-	products, total, err := h.ProductService.ListPublic(categoryID, search, page, pageSize)
+	products, total, err := h.ProductService.ListPublicForTenant(tenant, h.ResellerRepo, categoryID, search, page, pageSize)
 	if err != nil {
 		shared.RespondError(c, response.CodeInternal, "error.product_fetch_failed", err)
 		return
@@ -253,10 +447,26 @@ func (h *Handler) GetProducts(c *gin.Context) {
 		return
 	}
 
+	var resellerBatch *service.ResellerDisplayPricingBatch
+	if isResellerTenant(tenant) {
+		if h.ResellerPricingResolver == nil {
+			shared.RespondError(c, response.CodeNotFound, "error.product_not_found", nil)
+			return
+		}
+		resellerBatch, err = h.ResellerPricingResolver.LoadDisplayPricingBatch(tenant, products)
+		if err != nil {
+			shared.RespondError(c, response.CodeInternal, "error.product_fetch_failed", err)
+			return
+		}
+	}
+
 	decorated := make([]dto.ProductResp, 0, len(products))
 	for i := range products {
-		item, derr := h.decoratePublicProduct(&products[i], promotionService)
+		item, derr := h.decoratePublicProductForTenant(&products[i], promotionService, tenant, resellerBatch)
 		if derr != nil {
+			if errors.Is(derr, service.ErrResellerProductNotListed) {
+				continue
+			}
 			shared.RespondError(c, response.CodeInternal, "error.product_fetch_failed", derr)
 			return
 		}
@@ -271,8 +481,9 @@ func (h *Handler) GetProducts(c *gin.Context) {
 // GetProductBySlug 根据 slug 获取商品详情
 func (h *Handler) GetProductBySlug(c *gin.Context) {
 	slug := c.Param("slug")
+	tenant := tenantFromRequest(c)
 
-	product, err := h.ProductService.GetPublicBySlug(slug)
+	product, err := h.ProductService.GetPublicBySlugForTenant(tenant, h.ResellerRepo, slug)
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			shared.RespondError(c, response.CodeNotFound, "error.product_not_found", nil)
@@ -294,8 +505,25 @@ func (h *Handler) GetProductBySlug(c *gin.Context) {
 	}
 	*product = temp[0]
 
-	decorated, derr := h.decoratePublicProduct(product, promotionService)
+	var resellerBatch *service.ResellerDisplayPricingBatch
+	if isResellerTenant(tenant) {
+		if h.ResellerPricingResolver == nil {
+			shared.RespondError(c, response.CodeNotFound, "error.product_not_found", nil)
+			return
+		}
+		resellerBatch, err = h.ResellerPricingResolver.LoadDisplayPricingBatch(tenant, []models.Product{*product})
+		if err != nil {
+			shared.RespondError(c, response.CodeInternal, "error.product_fetch_failed", err)
+			return
+		}
+	}
+
+	decorated, derr := h.decoratePublicProductForTenant(product, promotionService, tenant, resellerBatch)
 	if derr != nil {
+		if errors.Is(derr, service.ErrResellerProductNotListed) {
+			shared.RespondError(c, response.CodeNotFound, "error.product_not_found", nil)
+			return
+		}
 		shared.RespondError(c, response.CodeInternal, "error.product_fetch_failed", derr)
 		return
 	}
@@ -308,6 +536,26 @@ func (h *Handler) GetProductBySlug(c *gin.Context) {
 }
 
 const publicRelatedPostsLimit = 6
+
+func tenantFromRequest(c *gin.Context) service.TenantContext {
+	if c != nil && c.Request != nil {
+		if tenant, ok := service.TenantFromContext(c.Request.Context()); ok {
+			return tenant
+		}
+	}
+	return service.MainTenantContext("")
+}
+
+func isResellerTenant(tenant service.TenantContext) bool {
+	return tenant.ResellerID != nil && !tenant.IsMain && !tenant.Unavailable
+}
+
+func isResellerDisplayHiddenError(err error) bool {
+	return errors.Is(err, service.ErrResellerProductNotListed) ||
+		errors.Is(err, service.ErrResellerPriceBelowBase) ||
+		errors.Is(err, service.ErrResellerMarkupExceeded) ||
+		errors.Is(err, service.ErrResellerPricingModeInvalid)
+}
 
 func (h *Handler) decoratePublicProduct(product *models.Product, promotionService *service.PromotionService, userMemberLevelID ...uint) (dto.ProductResp, error) {
 	if product == nil {
@@ -405,6 +653,61 @@ func (h *Handler) decoratePublicProduct(product *models.Product, promotionServic
 		item.PromotionPriceAmount = displayPromotionPrice
 	}
 
+	return item.toProductResp(), nil
+}
+
+func (h *Handler) decoratePublicProductForTenant(
+	product *models.Product,
+	promotionService *service.PromotionService,
+	tenant service.TenantContext,
+	resellerBatch *service.ResellerDisplayPricingBatch,
+	userMemberLevelID ...uint,
+) (dto.ProductResp, error) {
+	if !isResellerTenant(tenant) {
+		return h.decoratePublicProduct(product, promotionService, userMemberLevelID...)
+	}
+	if product == nil {
+		return dto.ProductResp{}, nil
+	}
+	if h == nil || h.ResellerPricingResolver == nil {
+		return dto.ProductResp{}, service.ErrResellerProductNotListed
+	}
+	display, err := h.ResellerPricingResolver.ResolveDisplayPrices(tenant, product, resellerBatch)
+	if err != nil {
+		if isResellerDisplayHiddenError(err) {
+			return dto.ProductResp{}, service.ErrResellerProductNotListed
+		}
+		return dto.ProductResp{}, err
+	}
+	if display == nil || !display.Visible {
+		return dto.ProductResp{}, service.ErrResellerProductNotListed
+	}
+
+	productCopy := *product
+	productCopy.PriceAmount = display.DisplayPrice
+	productCopy.WholesalePrices = nil
+	filteredSKUs := make([]models.ProductSKU, 0, len(product.SKUs))
+	for _, sku := range product.SKUs {
+		if !sku.IsActive || display.HiddenSKUIDs[sku.ID] {
+			continue
+		}
+		if price, ok := display.SKUPrices[sku.ID]; ok {
+			sku.PriceAmount = price
+		}
+		filteredSKUs = append(filteredSKUs, sku)
+	}
+	if len(product.SKUs) > 0 && len(filteredSKUs) == 0 {
+		return dto.ProductResp{}, service.ErrResellerProductNotListed
+	}
+	productCopy.SKUs = filteredSKUs
+
+	item := publicProductView{Product: productCopy}
+	h.decorateProductStock(&productCopy, &item)
+	skuViews := make([]publicSKUView, 0, len(productCopy.SKUs))
+	for _, sku := range productCopy.SKUs {
+		skuViews = append(skuViews, publicSKUView{ProductSKU: sku})
+	}
+	item.PublicSKUs = skuViews
 	return item.toProductResp(), nil
 }
 
@@ -647,9 +950,7 @@ func (h *Handler) decorateUpstreamStock(product *models.Product, item *publicPro
 // GetPosts 获取文章/公告列表
 func (h *Handler) GetPosts(c *gin.Context) {
 	// 获取分页参数
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	// 获取类型参数
 	postType := c.Query("type") // blog 或 notice
@@ -692,7 +993,7 @@ func (h *Handler) GetPostBySlug(c *gin.Context) {
 
 // GetCategories 获取分类列表
 func (h *Handler) GetCategories(c *gin.Context) {
-	categories, err := h.CategoryService.List()
+	categories, err := h.CategoryService.ListActive()
 	if err != nil {
 		shared.RespondError(c, response.CodeInternal, "error.category_fetch_failed", err)
 		return
@@ -751,6 +1052,7 @@ func (h *Handler) CreateGuestOrder(c *gin.Context) {
 		Email:               req.Email,
 		OrderPassword:       req.OrderPassword,
 		Locale:              i18n.ResolveLocale(c),
+		Tenant:              tenantFromRequest(c),
 		Items:               items,
 		CouponCode:          req.CouponCode,
 		AffiliateCode:       req.AffiliateCode,
@@ -818,6 +1120,7 @@ func (h *Handler) CreateGuestOrderAndPay(c *gin.Context) {
 		Email:               req.Email,
 		OrderPassword:       req.OrderPassword,
 		Locale:              i18n.ResolveLocale(c),
+		Tenant:              tenantFromRequest(c),
 		Items:               items,
 		CouponCode:          req.CouponCode,
 		AffiliateCode:       req.AffiliateCode,
@@ -872,6 +1175,20 @@ func (h *Handler) CreateGuestOrderAndPay(c *gin.Context) {
 		resp["interaction_mode"] = result.Payment.InteractionMode
 		resp["pay_url"] = result.Payment.PayURL
 		resp["qr_code"] = result.Payment.QRCode
+		if info := dto.ExtractCryptoWalletInfo(result.Payment.ProviderType, result.Payment.InteractionMode, result.Payment.ProviderPayload); info.HasAny() {
+			if info.Address != "" {
+				resp["wallet_address"] = info.Address
+			}
+			if info.ChainAmount != "" {
+				resp["chain_amount"] = info.ChainAmount
+			}
+			if info.Chain != "" {
+				resp["chain"] = info.Chain
+			}
+			if info.TokenID != "" {
+				resp["token_id"] = info.TokenID
+			}
+		}
 		resp["expires_at"] = result.Payment.ExpiredAt
 	}
 	response.Success(c, resp)
@@ -897,6 +1214,7 @@ func (h *Handler) PreviewGuestOrder(c *gin.Context) {
 		Email:               req.Email,
 		OrderPassword:       req.OrderPassword,
 		Locale:              i18n.ResolveLocale(c),
+		Tenant:              tenantFromRequest(c),
 		Items:               items,
 		CouponCode:          req.CouponCode,
 		AffiliateCode:       req.AffiliateCode,
@@ -926,7 +1244,7 @@ func (h *Handler) ListGuestOrders(c *gin.Context) {
 	}
 
 	if orderNo != "" {
-		order, err := h.OrderService.GetOrderByGuestOrderNo(orderNo, email, password)
+		order, err := h.OrderService.GetOrderByGuestOrderNoForTenant(tenantFromRequest(c), orderNo, email, password)
 		if err != nil {
 			if errors.Is(err, service.ErrGuestOrderNotFound) {
 				pagination := response.Pagination{
@@ -951,11 +1269,9 @@ func (h *Handler) ListGuestOrders(c *gin.Context) {
 		return
 	}
 
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
-	orders, total, err := h.OrderService.ListOrdersByGuest(email, password, page, pageSize)
+	orders, total, err := h.OrderService.ListOrdersByGuestForTenant(tenantFromRequest(c), email, password, page, pageSize)
 	if err != nil {
 		shared.RespondError(c, response.CodeInternal, "error.order_fetch_failed", err)
 		return
@@ -981,7 +1297,7 @@ func (h *Handler) GetGuestOrderByOrderNo(c *gin.Context) {
 		shared.RespondError(c, response.CodeBadRequest, "error.order_item_invalid", nil)
 		return
 	}
-	order, err := h.OrderService.GetOrderByGuestOrderNo(orderNo, email, password)
+	order, err := h.OrderService.GetOrderByGuestOrderNoForTenant(tenantFromRequest(c), orderNo, email, password)
 	if err != nil {
 		if errors.Is(err, service.ErrGuestOrderNotFound) {
 			shared.RespondError(c, response.CodeNotFound, "error.guest_order_not_found", nil)
@@ -1010,8 +1326,12 @@ func (h *Handler) DownloadGuestFulfillment(c *gin.Context) {
 		shared.RespondError(c, response.CodeBadRequest, "error.order_item_invalid", nil)
 		return
 	}
-	order, err := h.OrderRepo.GetAnyByOrderNoAndGuest(orderNo, email, password)
+	order, err := h.OrderService.GetAnyOrderByGuestOrderNoForTenant(tenantFromRequest(c), orderNo, email, password)
 	if err != nil {
+		if errors.Is(err, service.ErrGuestOrderNotFound) {
+			shared.RespondError(c, response.CodeNotFound, "error.guest_order_not_found", nil)
+			return
+		}
 		shared.RespondError(c, response.CodeInternal, "error.order_fetch_failed", err)
 		return
 	}
@@ -1053,7 +1373,7 @@ func (h *Handler) CreateGuestPayment(c *gin.Context) {
 		shared.RespondError(c, response.CodeBadRequest, "error.guest_password_required", nil)
 		return
 	}
-	guestOrder, err := h.OrderService.GetOrderByGuestOrderNo(req.OrderNo, email, password)
+	guestOrder, err := h.OrderService.GetOrderByGuestOrderNoForTenant(tenantFromRequest(c), req.OrderNo, email, password)
 	if err != nil {
 		if errors.Is(err, service.ErrGuestOrderNotFound) {
 			shared.RespondError(c, response.CodeNotFound, "error.guest_order_not_found", nil)
@@ -1114,7 +1434,7 @@ func (h *Handler) CaptureGuestPayment(c *gin.Context) {
 		shared.RespondError(c, response.CodeInternal, "error.payment_fetch_failed", err)
 		return
 	}
-	if _, err := h.OrderService.GetOrderByGuest(payment.OrderID, email, password); err != nil {
+	if _, err := h.OrderService.GetOrderByGuestForTenant(tenantFromRequest(c), payment.OrderID, email, password); err != nil {
 		if errors.Is(err, service.ErrGuestOrderNotFound) {
 			shared.RespondError(c, response.CodeNotFound, "error.guest_order_not_found", nil)
 			return
@@ -1155,7 +1475,7 @@ func (h *Handler) GetGuestLatestPayment(c *gin.Context) {
 		return
 	}
 
-	order, err := h.OrderService.GetOrderByGuestOrderNo(query.OrderNo, email, password)
+	order, err := h.OrderService.GetOrderByGuestOrderNoForTenant(tenantFromRequest(c), query.OrderNo, email, password)
 	if err != nil {
 		if errors.Is(err, service.ErrGuestOrderNotFound) {
 			shared.RespondError(c, response.CodeNotFound, "error.guest_order_not_found", nil)

@@ -7,6 +7,7 @@ import (
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/models"
+	"github.com/dujiao-next/internal/payment/provider"
 	"github.com/dujiao-next/internal/repository"
 
 	"github.com/glebarez/sqlite"
@@ -45,16 +46,33 @@ func setupPaymentServiceWalletTest(t *testing.T) (*PaymentService, *gorm.DB) {
 	channelRepo := repository.NewPaymentChannelRepository(db)
 	walletRepo := repository.NewWalletRepository(db)
 	userRepo := repository.NewUserRepository(db)
-	walletSvc := NewWalletService(walletRepo, orderRepo, userRepo, nil, nil)
+	refundRecordRepo := repository.NewOrderRefundRecordRepository(db)
+	walletSvc := NewWalletService(walletRepo, orderRepo, refundRecordRepo, userRepo, nil, nil)
+
+	// 构建与 Container.BuildRunner 相同的 PaymentProviderRegistry，
+	// 确保 applyProviderPayment 通过 Registry 路由时各 adapter 可以被找到。
+	reg := provider.NewRegistry()
+	reg.Register(constants.PaymentProviderOfficial, constants.PaymentChannelTypeStripe, provider.NewStripeAdapter())
+	reg.Register(constants.PaymentProviderOfficial, constants.PaymentChannelTypePaypal, provider.NewPaypalAdapter())
+	reg.Register(constants.PaymentProviderOfficial, constants.PaymentChannelTypeWechat, provider.NewWechatpayAdapter())
+	reg.Register(constants.PaymentProviderOfficial, constants.PaymentChannelTypeAlipay, provider.NewAlipayAdapter())
+	reg.Register(constants.PaymentProviderEpay, "", provider.NewEpayAdapter())
+	reg.Register(constants.PaymentProviderEpusdt, "", provider.NewEpusdtAdapter())
+	reg.Register(constants.PaymentProviderBepusdt, "", provider.NewBepusdtAdapter())
+	reg.Register(constants.PaymentProviderDujiaoPay, "", provider.NewDujiaoPayAdapter())
+	reg.Register(constants.PaymentProviderTokenpay, "", provider.NewTokenpayAdapter())
+	reg.Register(constants.PaymentProviderOkpay, "", provider.NewOkpayAdapter())
+
 	paymentSvc := NewPaymentService(PaymentServiceOptions{
-		OrderRepo:      orderRepo,
-		ProductRepo:    productRepo,
-		ProductSKURepo: productSKURepo,
-		PaymentRepo:    paymentRepo,
-		ChannelRepo:    channelRepo,
-		WalletRepo:     walletRepo,
-		WalletService:  walletSvc,
-		ExpireMinutes:  15,
+		OrderRepo:               orderRepo,
+		ProductRepo:             productRepo,
+		ProductSKURepo:          productSKURepo,
+		PaymentRepo:             paymentRepo,
+		ChannelRepo:             channelRepo,
+		WalletRepo:              walletRepo,
+		WalletService:           walletSvc,
+		ExpireMinutes:           15,
+		PaymentProviderRegistry: reg,
 	})
 
 	return paymentSvc, db

@@ -32,6 +32,7 @@ var (
 type ProcurementOrderService struct {
 	procRepo              repository.ProcurementOrderRepository
 	orderRepo             repository.OrderRepository
+	fulfillmentRepo       repository.FulfillmentRepository
 	mappingRepo           repository.ProductMappingRepository
 	skuMapRepo            repository.SKUMappingRepository
 	connSvc               *SiteConnectionService
@@ -57,6 +58,7 @@ func (s *ProcurementOrderService) SetNotificationService(svc *NotificationServic
 func NewProcurementOrderService(
 	procRepo repository.ProcurementOrderRepository,
 	orderRepo repository.OrderRepository,
+	fulfillmentRepo repository.FulfillmentRepository,
 	mappingRepo repository.ProductMappingRepository,
 	skuMapRepo repository.SKUMappingRepository,
 	connSvc *SiteConnectionService,
@@ -68,6 +70,7 @@ func NewProcurementOrderService(
 	return &ProcurementOrderService{
 		procRepo:           procRepo,
 		orderRepo:          orderRepo,
+		fulfillmentRepo:    fulfillmentRepo,
 		mappingRepo:        mappingRepo,
 		skuMapRepo:         skuMapRepo,
 		connSvc:            connSvc,
@@ -569,12 +572,13 @@ func (s *ProcurementOrderService) createUpstreamFulfillment(orderID uint, uf *up
 	}
 
 	return s.orderRepo.Transaction(func(tx *gorm.DB) error {
+		fulfillRepo := s.fulfillmentRepo.WithTx(tx)
+
 		// 检查是否已有交付记录
-		var existing models.Fulfillment
-		if err := tx.Where("order_id = ?", orderID).First(&existing).Error; err == nil {
-			return nil // 已存在，跳过
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		if _, found, err := fulfillRepo.FindByOrderIDForUpdate(orderID); err != nil {
 			return err
+		} else if found {
+			return nil // 已存在,跳过
 		}
 
 		fulfillment := &models.Fulfillment{
@@ -587,7 +591,7 @@ func (s *ProcurementOrderService) createUpstreamFulfillment(orderID uint, uf *up
 			CreatedAt:     now,
 			UpdatedAt:     now,
 		}
-		return tx.Create(fulfillment).Error
+		return fulfillRepo.Create(fulfillment)
 	})
 }
 

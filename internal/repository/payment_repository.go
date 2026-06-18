@@ -9,6 +9,7 @@ import (
 	"github.com/dujiao-next/internal/models"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // PaymentRepository 支付数据访问接口
@@ -21,8 +22,10 @@ type PaymentRepository interface {
 	GetLatestByProviderRef(providerRef string) (*models.Payment, error)
 	ListByOrderID(orderID uint) ([]models.Payment, error)
 	GetLatestPendingByOrder(orderID uint, now time.Time) (*models.Payment, error)
+	ExpirePendingByOrderIDs(orderIDs []uint, expiredAt time.Time) (int64, error)
 	ListAdmin(filter PaymentListFilter) ([]models.Payment, int64, error)
 	Transaction(fn func(tx *gorm.DB) error) error
+	GetByIDForUpdate(id uint) (*models.Payment, error)
 	WithTx(tx *gorm.DB) *GormPaymentRepository
 }
 
@@ -159,6 +162,21 @@ func (r *GormPaymentRepository) GetLatestPendingByOrderChannel(orderID uint, cha
 	return &payment, nil
 }
 
+// ExpirePendingByOrderIDs 将指定订单的未完成支付记录标记为过期。
+func (r *GormPaymentRepository) ExpirePendingByOrderIDs(orderIDs []uint, expiredAt time.Time) (int64, error) {
+	if len(orderIDs) == 0 {
+		return 0, nil
+	}
+	result := r.db.Model(&models.Payment{}).
+		Where("order_id IN ? AND status IN ?", orderIDs, []string{constants.PaymentStatusInitiated, constants.PaymentStatusPending}).
+		Updates(map[string]interface{}{
+			"status":     constants.PaymentStatusExpired,
+			"expired_at": expiredAt,
+			"updated_at": expiredAt,
+		})
+	return result.RowsAffected, result.Error
+}
+
 // ListAdmin 管理端支付列表
 func (r *GormPaymentRepository) ListAdmin(filter PaymentListFilter) ([]models.Payment, int64, error) {
 	query := r.db.Model(&models.Payment{})
@@ -227,4 +245,19 @@ func (r *GormPaymentRepository) ListAdmin(filter PaymentListFilter) ([]models.Pa
 		return nil, 0, err
 	}
 	return payments, total, nil
+}
+
+// GetByIDForUpdate 事务中加行锁读取支付单,不存在返回 (nil, nil)。
+func (r *GormPaymentRepository) GetByIDForUpdate(id uint) (*models.Payment, error) {
+	if id == 0 {
+		return nil, nil
+	}
+	var payment models.Payment
+	if err := r.db.Clauses(clause.Locking{Strength: "UPDATE"}).First(&payment, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &payment, nil
 }

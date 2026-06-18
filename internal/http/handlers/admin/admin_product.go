@@ -8,6 +8,7 @@ import (
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/http/response"
+	"github.com/dujiao-next/internal/i18n"
 	"github.com/dujiao-next/internal/models"
 	"github.com/dujiao-next/internal/service"
 
@@ -17,9 +18,7 @@ import (
 
 // GetAdminProducts 获取商品列表 (Admin)
 func (h *Handler) GetAdminProducts(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 	categoryID := c.Query("category_id")
 	search := c.Query("search")
 	fulfillmentType := strings.TrimSpace(c.Query("fulfillment_type"))
@@ -27,9 +26,21 @@ func (h *Handler) GetAdminProducts(c *gin.Context) {
 	if stockStatus == "" {
 		stockStatus = c.Query("stock_staus")
 	}
+	hasWholesalePrices, err := parseWholesaleFilter(c.Query("wholesale"))
+	if err != nil {
+		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+		return
+	}
+	if hasWholesalePrices == nil {
+		hasWholesalePrices, err = parseWholesaleFilter(c.Query("has_wholesale_prices"))
+		if err != nil {
+			shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+			return
+		}
+	}
 
 	lowStockThreshold := h.SettingService.GetDashboardLowStockThreshold()
-	products, total, err := h.ProductService.ListAdmin(categoryID, search, fulfillmentType, stockStatus, lowStockThreshold, page, pageSize)
+	products, total, err := h.ProductService.ListAdmin(categoryID, search, fulfillmentType, stockStatus, hasWholesalePrices, lowStockThreshold, page, pageSize)
 	if err != nil {
 		shared.RespondError(c, response.CodeInternal, "error.product_fetch_failed", err)
 		return
@@ -44,6 +55,26 @@ func (h *Handler) GetAdminProducts(c *gin.Context) {
 
 	pagination := response.BuildPagination(page, pageSize, total)
 	response.SuccessWithPage(c, products, pagination)
+}
+
+func parseWholesaleFilter(raw string) (*bool, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "", "all":
+		return nil, nil
+	case "1", "true", "yes", "on", "enabled", "has":
+		parsed := true
+		return &parsed, nil
+	case "0", "false", "no", "off", "disabled", "none":
+		parsed := false
+		return &parsed, nil
+	default:
+		parsed, err := strconv.ParseBool(value)
+		if err != nil {
+			return nil, err
+		}
+		return &parsed, nil
+	}
 }
 
 // GetAdminProduct 获取商品详情 (Admin)
@@ -90,30 +121,53 @@ type ProductSKURequest struct {
 	SortOrder        int                    `json:"sort_order"`
 }
 
+type WholesalePriceRequest struct {
+	MinQuantity int     `json:"min_quantity"`
+	UnitPrice   float64 `json:"unit_price"`
+}
+
 // CreateProductRequest 创建商品请求
 type CreateProductRequest struct {
-	CategoryID          uint                   `json:"category_id" binding:"required"`
-	Slug                string                 `json:"slug" binding:"required"`
-	SeoMetaJSON         map[string]interface{} `json:"seo_meta"`
-	TitleJSON           map[string]interface{} `json:"title" binding:"required"`
-	DescriptionJSON     map[string]interface{} `json:"description"`
-	ContentJSON         map[string]interface{} `json:"content"`
-	InstructionsJSON    map[string]interface{} `json:"instructions"`
-	ManualFormSchema    map[string]interface{} `json:"manual_form_schema"`
-	PriceAmount         float64                `json:"price_amount" binding:"required"`
-	CostPriceAmount     float64                `json:"cost_price_amount"`
-	Images              []string               `json:"images"`
-	Tags                []string               `json:"tags"`
-	PurchaseType        string                 `json:"purchase_type"`
-	MinPurchaseQuantity *int                   `json:"min_purchase_quantity"`
-	MaxPurchaseQuantity *int                   `json:"max_purchase_quantity"`
-	FulfillmentType     string                 `json:"fulfillment_type"`
-	ManualStockTotal    *int                   `json:"manual_stock_total"`
-	SKUs                []ProductSKURequest    `json:"skus"`
-	PaymentChannelIDs   []uint                 `json:"payment_channel_ids"`
-	IsAffiliateEnabled  *bool                  `json:"is_affiliate_enabled"`
-	IsActive            *bool                  `json:"is_active"`
-	SortOrder           int                    `json:"sort_order"`
+	CategoryID          uint                     `json:"category_id" binding:"required"`
+	Slug                string                   `json:"slug" binding:"required"`
+	SeoMetaJSON         map[string]interface{}   `json:"seo_meta"`
+	TitleJSON           map[string]interface{}   `json:"title" binding:"required"`
+	DescriptionJSON     map[string]interface{}   `json:"description"`
+	ContentJSON         map[string]interface{}   `json:"content"`
+	InstructionsJSON    map[string]interface{}   `json:"instructions"`
+	ManualFormSchema    map[string]interface{}   `json:"manual_form_schema"`
+	PriceAmount         float64                  `json:"price_amount" binding:"required"`
+	CostPriceAmount     float64                  `json:"cost_price_amount"`
+	WholesalePrices     *[]WholesalePriceRequest `json:"wholesale_prices"`
+	Images              []string                 `json:"images"`
+	Tags                []string                 `json:"tags"`
+	PurchaseType        string                   `json:"purchase_type"`
+	MinPurchaseQuantity *int                     `json:"min_purchase_quantity"`
+	MaxPurchaseQuantity *int                     `json:"max_purchase_quantity"`
+	StockDisplayMode    string                   `json:"stock_display_mode"`
+	FulfillmentType     string                   `json:"fulfillment_type"`
+	ManualStockTotal    *int                     `json:"manual_stock_total"`
+	SKUs                []ProductSKURequest      `json:"skus"`
+	PaymentChannelIDs   []uint                   `json:"payment_channel_ids"`
+	IsAffiliateEnabled  *bool                    `json:"is_affiliate_enabled"`
+	IsActive            *bool                    `json:"is_active"`
+	SortOrder           int                      `json:"sort_order"`
+}
+
+// toWholesalePriceInputs 透传「是否提供」语义：请求未携带 wholesale_prices 时返回 nil
+// （Update 保留原配置），携带（含空数组）时返回非 nil 指针以整体覆盖。
+func toWholesalePriceInputs(items *[]WholesalePriceRequest) *[]service.WholesalePriceInput {
+	if items == nil {
+		return nil
+	}
+	result := make([]service.WholesalePriceInput, 0, len(*items))
+	for _, item := range *items {
+		result = append(result, service.WholesalePriceInput{
+			MinQuantity: item.MinQuantity,
+			UnitPrice:   decimal.NewFromFloat(item.UnitPrice),
+		})
+	}
+	return &result
 }
 
 func toProductSKUInputs(items []ProductSKURequest) []service.ProductSKUInput {
@@ -155,11 +209,13 @@ func (h *Handler) CreateProduct(c *gin.Context) {
 		ManualFormSchemaJSON: req.ManualFormSchema,
 		PriceAmount:          decimal.NewFromFloat(req.PriceAmount),
 		CostPriceAmount:      decimal.NewFromFloat(req.CostPriceAmount),
+		WholesalePrices:      toWholesalePriceInputs(req.WholesalePrices),
 		Images:               req.Images,
 		Tags:                 req.Tags,
 		PurchaseType:         req.PurchaseType,
 		MinPurchaseQuantity:  req.MinPurchaseQuantity,
 		MaxPurchaseQuantity:  req.MaxPurchaseQuantity,
+		StockDisplayMode:     req.StockDisplayMode,
 		FulfillmentType:      req.FulfillmentType,
 		ManualStockTotal:     req.ManualStockTotal,
 		SKUs:                 toProductSKUInputs(req.SKUs),
@@ -201,6 +257,14 @@ func (h *Handler) CreateProduct(c *gin.Context) {
 			shared.RespondError(c, response.CodeBadRequest, "error.product_purchase_limit_invalid", nil)
 			return
 		}
+		if errors.Is(err, service.ErrProductStockDisplayInvalid) {
+			shared.RespondError(c, response.CodeBadRequest, "error.bad_request", nil)
+			return
+		}
+		if errors.Is(err, service.ErrWholesalePriceInvalid) {
+			shared.RespondError(c, response.CodeBadRequest, "error.wholesale_price_invalid", nil)
+			return
+		}
 		if errors.Is(err, service.ErrProductSKUInvalid) {
 			shared.RespondError(c, response.CodeBadRequest, "error.bad_request", nil)
 			return
@@ -237,11 +301,13 @@ func (h *Handler) UpdateProduct(c *gin.Context) {
 		ManualFormSchemaJSON: req.ManualFormSchema,
 		PriceAmount:          decimal.NewFromFloat(req.PriceAmount),
 		CostPriceAmount:      decimal.NewFromFloat(req.CostPriceAmount),
+		WholesalePrices:      toWholesalePriceInputs(req.WholesalePrices),
 		Images:               req.Images,
 		Tags:                 req.Tags,
 		PurchaseType:         req.PurchaseType,
 		MinPurchaseQuantity:  req.MinPurchaseQuantity,
 		MaxPurchaseQuantity:  req.MaxPurchaseQuantity,
+		StockDisplayMode:     req.StockDisplayMode,
 		FulfillmentType:      req.FulfillmentType,
 		ManualStockTotal:     req.ManualStockTotal,
 		SKUs:                 toProductSKUInputs(req.SKUs),
@@ -287,6 +353,14 @@ func (h *Handler) UpdateProduct(c *gin.Context) {
 			shared.RespondError(c, response.CodeBadRequest, "error.product_purchase_limit_invalid", nil)
 			return
 		}
+		if errors.Is(err, service.ErrProductStockDisplayInvalid) {
+			shared.RespondError(c, response.CodeBadRequest, "error.bad_request", nil)
+			return
+		}
+		if errors.Is(err, service.ErrWholesalePriceInvalid) {
+			shared.RespondError(c, response.CodeBadRequest, "error.wholesale_price_invalid", nil)
+			return
+		}
 		if errors.Is(err, service.ErrProductSKUInvalid) {
 			shared.RespondError(c, response.CodeBadRequest, "error.bad_request", nil)
 			return
@@ -307,6 +381,42 @@ type QuickUpdateProductRequest struct {
 	IsActive   *bool `json:"is_active"`
 	SortOrder  *int  `json:"sort_order"`
 	CategoryID *uint `json:"category_id"`
+}
+
+type UpdateWholesalePricesRequest struct {
+	WholesalePrices *[]WholesalePriceRequest `json:"wholesale_prices" binding:"required"`
+}
+
+// UpdateProductWholesalePrices 更新商品批发价阶梯。
+func (h *Handler) UpdateProductWholesalePrices(c *gin.Context) {
+	id := c.Param("id")
+
+	var req UpdateWholesalePricesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		shared.RespondBindError(c, err)
+		return
+	}
+	inputs := toWholesalePriceInputs(req.WholesalePrices)
+	if inputs == nil {
+		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", nil)
+		return
+	}
+
+	product, err := h.ProductService.UpdateWholesalePrices(id, *inputs)
+	if err != nil {
+		if errors.Is(err, service.ErrNotFound) {
+			shared.RespondError(c, response.CodeNotFound, "error.product_not_found", nil)
+			return
+		}
+		if errors.Is(err, service.ErrWholesalePriceInvalid) {
+			shared.RespondError(c, response.CodeBadRequest, "error.wholesale_price_invalid", nil)
+			return
+		}
+		shared.RespondError(c, response.CodeInternal, "error.product_update_failed", err)
+		return
+	}
+
+	response.Success(c, product)
 }
 
 // QuickUpdateProduct 快速更新商品（状态/排序/分类）
@@ -338,6 +448,10 @@ func (h *Handler) QuickUpdateProduct(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, service.ErrNotFound) {
 			shared.RespondError(c, response.CodeNotFound, "error.product_not_found", nil)
+			return
+		}
+		if errors.Is(err, service.ErrProductCategoryInvalid) {
+			shared.RespondError(c, response.CodeBadRequest, "error.product_category_invalid", nil)
 			return
 		}
 		shared.RespondError(c, response.CodeInternal, "error.product_update_failed", err)
@@ -451,6 +565,27 @@ type BatchProductCategoryRequest struct {
 	CategoryID uint   `json:"category_id"`
 }
 
+type batchProductFailureItem struct {
+	ID        uint   `json:"id"`
+	ErrorCode string `json:"error_code"`
+	Message   string `json:"message"`
+}
+
+func productBatchFailureFromError(locale string, id uint, err error) batchProductFailureItem {
+	errorCode := "product_update_failed"
+	switch {
+	case errors.Is(err, service.ErrProductCategoryInvalid):
+		errorCode = "product_category_invalid"
+	case errors.Is(err, service.ErrNotFound):
+		errorCode = "product_not_found"
+	}
+	return batchProductFailureItem{
+		ID:        id,
+		ErrorCode: errorCode,
+		Message:   i18n.T(locale, "error."+errorCode),
+	}
+}
+
 // BatchUpdateProductStatus 批量上架/下架
 func (h *Handler) BatchUpdateProductStatus(c *gin.Context) {
 	var req BatchProductStatusRequest
@@ -458,14 +593,18 @@ func (h *Handler) BatchUpdateProductStatus(c *gin.Context) {
 		shared.RespondBindError(c, err)
 		return
 	}
+	locale := i18n.ResolveLocale(c)
 	successCount := 0
+	failedItems := make([]batchProductFailureItem, 0)
 	for _, id := range req.IDs {
 		_, err := h.ProductService.QuickUpdate(strconv.FormatUint(uint64(id), 10), map[string]interface{}{"is_active": req.IsActive})
 		if err == nil {
 			successCount++
+		} else {
+			failedItems = append(failedItems, productBatchFailureFromError(locale, id, err))
 		}
 	}
-	response.Success(c, gin.H{"total": len(req.IDs), "success_count": successCount})
+	response.Success(c, gin.H{"total": len(req.IDs), "success_count": successCount, "failed_items": failedItems})
 }
 
 // BatchUpdateProductCategory 批量修改分类

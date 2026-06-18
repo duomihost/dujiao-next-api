@@ -10,6 +10,7 @@ const (
 	AdminLoginEvent2FADisabled         = "2fa_disabled"         // 自助关闭
 	AdminLoginEventRecoveryRegenerated = "recovery_regenerated" // 重新生成恢复码
 	AdminLoginEvent2FAResetByAdmin     = "2fa_reset_by_admin"   // 超管重置他人
+	AdminLoginEventPasswordResetByCLI  = "password_reset_by_cli" // 运维通过 admin-tool 重置密码
 )
 
 // AdminLoginStatus 登录结果

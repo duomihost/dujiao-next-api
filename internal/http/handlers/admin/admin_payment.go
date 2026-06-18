@@ -21,6 +21,7 @@ import (
 type AdminPaymentItem struct {
 	models.Payment
 	ChannelName    string `json:"channel_name"`
+	OrderNo        string `json:"order_no,omitempty"`
 	RechargeNo     string `json:"recharge_no,omitempty"`
 	RechargeStatus string `json:"recharge_status,omitempty"`
 	RechargeUserID uint   `json:"recharge_user_id,omitempty"`
@@ -30,9 +31,7 @@ const adminPaymentExportBatchSize = 500
 
 // GetAdminPayments 获取支付记录列表
 func (h *Handler) GetAdminPayments(c *gin.Context) {
-	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
-	page, pageSize = shared.NormalizePagination(page, pageSize)
+	page, pageSize := shared.ParsePagination(c)
 
 	filter, err := buildAdminPaymentFilter(c, page, pageSize)
 	if err != nil {
@@ -57,6 +56,11 @@ func (h *Handler) GetAdminPayments(c *gin.Context) {
 		shared.RespondError(c, response.CodeInternal, "error.payment_fetch_failed", err)
 		return
 	}
+	orderNoMap, err := h.resolvePaymentOrderNos(payments)
+	if err != nil {
+		shared.RespondError(c, response.CodeInternal, "error.payment_fetch_failed", err)
+		return
+	}
 
 	items := make([]AdminPaymentItem, 0, len(payments))
 	for _, payment := range payments {
@@ -64,6 +68,7 @@ func (h *Handler) GetAdminPayments(c *gin.Context) {
 		items = append(items, AdminPaymentItem{
 			Payment:        payment,
 			ChannelName:    channelNameMap[payment.ChannelID],
+			OrderNo:        orderNoMap[payment.OrderID],
 			RechargeNo:     rechargeMeta.RechargeNo,
 			RechargeStatus: rechargeMeta.Status,
 			RechargeUserID: rechargeMeta.UserID,
@@ -170,10 +175,16 @@ func (h *Handler) GetAdminPayment(c *gin.Context) {
 		shared.RespondError(c, response.CodeInternal, "error.payment_fetch_failed", err)
 		return
 	}
+	orderNoMap, err := h.resolvePaymentOrderNos([]models.Payment{*payment})
+	if err != nil {
+		shared.RespondError(c, response.CodeInternal, "error.payment_fetch_failed", err)
+		return
+	}
 	rechargeMeta := rechargeMetaMap[payment.ID]
 	response.Success(c, AdminPaymentItem{
 		Payment:        *payment,
 		ChannelName:    channelNameMap[payment.ChannelID],
+		OrderNo:        orderNoMap[payment.OrderID],
 		RechargeNo:     rechargeMeta.RechargeNo,
 		RechargeStatus: rechargeMeta.Status,
 		RechargeUserID: rechargeMeta.UserID,
@@ -201,11 +212,7 @@ func buildAdminPaymentFilter(c *gin.Context, page, pageSize int) (repository.Pay
 		return repository.PaymentListFilter{}, err
 	}
 
-	createdFrom, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("created_from")))
-	if err != nil {
-		return repository.PaymentListFilter{}, err
-	}
-	createdTo, err := shared.ParseTimeNullable(strings.TrimSpace(c.Query("created_to")))
+	createdFrom, createdTo, err := shared.ParseQueryTimeRange(c, "created_from", "created_to")
 	if err != nil {
 		return repository.PaymentListFilter{}, err
 	}
@@ -277,6 +284,33 @@ func (h *Handler) resolvePaymentChannelNames(payments []models.Payment) (map[uin
 	}
 	for _, channel := range channels {
 		result[channel.ID] = channel.Name
+	}
+	return result, nil
+}
+
+func (h *Handler) resolvePaymentOrderNos(payments []models.Payment) (map[uint]string, error) {
+	orderIDs := make([]uint, 0, len(payments))
+	seen := make(map[uint]struct{})
+	for _, payment := range payments {
+		if payment.OrderID == 0 {
+			continue
+		}
+		if _, ok := seen[payment.OrderID]; ok {
+			continue
+		}
+		seen[payment.OrderID] = struct{}{}
+		orderIDs = append(orderIDs, payment.OrderID)
+	}
+	result := make(map[uint]string)
+	if len(orderIDs) == 0 || h.OrderRepo == nil {
+		return result, nil
+	}
+	orders, err := h.OrderRepo.GetByIDs(orderIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, order := range orders {
+		result[order.ID] = strings.TrimSpace(order.OrderNo)
 	}
 	return result, nil
 }
