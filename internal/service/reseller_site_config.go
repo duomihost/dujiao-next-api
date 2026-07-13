@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net/mail"
 	"net/url"
-	"regexp"
 	"strings"
 
 	"github.com/dujiao-next/internal/cache"
@@ -46,12 +45,6 @@ type ResellerNavConfigInput struct {
 	CustomItems []ResellerFooterLinkInput `json:"custom_items"`
 }
 
-type ResellerThemeInput struct {
-	PrimaryColor string `json:"primary_color"`
-	AccentColor  string `json:"accent_color"`
-	SurfaceColor string `json:"surface_color"`
-}
-
 type ResellerSiteConfigInput struct {
 	SiteName     string                    `json:"site_name"`
 	Logo         string                    `json:"logo"`
@@ -61,7 +54,6 @@ type ResellerSiteConfigInput struct {
 	SEO          ResellerSEOInput          `json:"seo"`
 	FooterLinks  []ResellerFooterLinkInput `json:"footer_links"`
 	NavConfig    ResellerNavConfigInput    `json:"nav_config"`
-	Theme        ResellerThemeInput        `json:"theme"`
 }
 
 type ResellerSiteConfigService struct {
@@ -71,8 +63,6 @@ type ResellerSiteConfigService struct {
 func NewResellerSiteConfigService(repo repository.ResellerRepository) *ResellerSiteConfigService {
 	return &ResellerSiteConfigService{repo: repo}
 }
-
-var resellerHexColorPattern = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
 
 func trimLimit(raw string, max int) string {
 	value := strings.TrimSpace(raw)
@@ -84,6 +74,22 @@ func trimLimit(raw string, max int) string {
 		return string(runes[:max])
 	}
 	return value
+}
+
+// ResellerSiteConfigFieldError 在站点配置校验失败时携带具体字段，便于前端给出精确提示。
+// 通过 Unwrap 兼容既有的 errors.Is(err, ErrResellerSiteConfigInvalid) 判断。
+type ResellerSiteConfigFieldError struct {
+	Field string
+}
+
+func (e *ResellerSiteConfigFieldError) Error() string {
+	return "reseller site config field invalid: " + e.Field
+}
+
+func (e *ResellerSiteConfigFieldError) Unwrap() error { return ErrResellerSiteConfigInvalid }
+
+func newResellerFieldError(field string) error {
+	return &ResellerSiteConfigFieldError{Field: field}
 }
 
 func normalizeResellerLocalizedText(raw LocalizedTextInput, max int) models.JSON {
@@ -137,11 +143,11 @@ func validateSupportURL(raw string) (string, error) {
 func normalizeResellerSupport(input ResellerSupportInput) (models.JSON, error) {
 	telegram := trimLimit(input.Telegram, 500)
 	if telegram != "" && !strings.HasPrefix(telegram, "https://t.me/") && !strings.HasPrefix(telegram, "tg://") {
-		return nil, ErrResellerSiteConfigInvalid
+		return nil, newResellerFieldError("support_telegram")
 	}
 	whatsApp := trimLimit(input.WhatsApp, 500)
 	if whatsApp != "" && !strings.HasPrefix(whatsApp, "https://wa.me/") && !strings.HasPrefix(whatsApp, "https://api.whatsapp.com/") {
-		return nil, ErrResellerSiteConfigInvalid
+		return nil, newResellerFieldError("support_whatsapp")
 	}
 	email := trimLimit(input.Email, 320)
 	if strings.HasPrefix(email, "mailto:") {
@@ -149,12 +155,12 @@ func normalizeResellerSupport(input ResellerSupportInput) (models.JSON, error) {
 	}
 	if email != "" {
 		if _, err := mail.ParseAddress(email); err != nil {
-			return nil, ErrResellerSiteConfigInvalid
+			return nil, newResellerFieldError("support_email")
 		}
 	}
 	supportURL, err := validateSupportURL(input.SupportURL)
 	if err != nil {
-		return nil, err
+		return nil, newResellerFieldError("support_url")
 	}
 	return models.JSON{"telegram": telegram, "whatsapp": whatsApp, "email": email, "support_url": supportURL}, nil
 }
@@ -168,14 +174,16 @@ func normalizeResellerAnnouncement(input ResellerAnnouncementInput) models.JSON 
 		"enabled": input.Enabled,
 		"type":    typ,
 		"title":   normalizeResellerLocalizedText(input.Title, 120),
-		"content": normalizeResellerLocalizedText(input.Content, 1000),
+		// 公告内容为富文本 HTML（前端 TipTap），含标签开销，限额需高于纯文本；
+		// 按 rune 截断仍可能切断标签，但前端渲染统一经 DOMPurify 解析补全，不会破坏页面。
+		"content": normalizeResellerLocalizedText(input.Content, 4000),
 	}
 }
 
 func normalizeResellerSEO(input ResellerSEOInput) (models.JSON, error) {
 	image, err := validateHTTPOrUploadPath(input.DefaultOGImage)
 	if err != nil {
-		return nil, err
+		return nil, newResellerFieldError("image")
 	}
 	return models.JSON{
 		"title":            normalizeResellerLocalizedText(input.Title, 120),
@@ -193,7 +201,7 @@ func normalizeResellerFooterLinks(input []ResellerFooterLinkInput) (models.JSON,
 		}
 		urlValue, err := validateSupportURL(item.URL)
 		if err != nil {
-			return nil, err
+			return nil, newResellerFieldError("link")
 		}
 		if urlValue == "" {
 			continue
@@ -220,28 +228,14 @@ func normalizeResellerNavConfig(input ResellerNavConfigInput) (models.JSON, erro
 	return models.JSON{"builtin": builtin, "custom_items": custom["items"]}, nil
 }
 
-func normalizeResellerTheme(input ResellerThemeInput) models.JSON {
-	out := models.JSON{}
-	if resellerHexColorPattern.MatchString(strings.TrimSpace(input.PrimaryColor)) {
-		out["primary_color"] = strings.TrimSpace(input.PrimaryColor)
-	}
-	if resellerHexColorPattern.MatchString(strings.TrimSpace(input.AccentColor)) {
-		out["accent_color"] = strings.TrimSpace(input.AccentColor)
-	}
-	if resellerHexColorPattern.MatchString(strings.TrimSpace(input.SurfaceColor)) {
-		out["surface_color"] = strings.TrimSpace(input.SurfaceColor)
-	}
-	return out
-}
-
 func (s *ResellerSiteConfigService) buildModel(resellerID uint, input ResellerSiteConfigInput) (*models.ResellerSiteConfig, error) {
 	logo, err := validateHTTPOrUploadPath(input.Logo)
 	if err != nil {
-		return nil, err
+		return nil, newResellerFieldError("image")
 	}
 	favicon, err := validateHTTPOrUploadPath(input.Favicon)
 	if err != nil {
-		return nil, err
+		return nil, newResellerFieldError("image")
 	}
 	support, err := normalizeResellerSupport(input.Support)
 	if err != nil {
@@ -269,7 +263,7 @@ func (s *ResellerSiteConfigService) buildModel(resellerID uint, input ResellerSi
 		SEOJSON:          seo,
 		FooterLinksJSON:  footerLinks,
 		NavConfigJSON:    navConfig,
-		ThemeJSON:        normalizeResellerTheme(input.Theme),
+		ThemeJSON:        models.JSON{},
 	}, nil
 }
 
@@ -418,6 +412,43 @@ func footerItemsFromEnvelope(raw models.JSON) []interface{} {
 	return make([]interface{}, 0)
 }
 
+// resellerAnnouncementLocalizedMap 兼容两种载体：DB 反序列化后的 map[string]interface{}
+// 与 Upsert 后内存对象里的 models.JSON。
+func resellerAnnouncementLocalizedMap(raw interface{}) map[string]interface{} {
+	switch typed := raw.(type) {
+	case map[string]interface{}:
+		return typed
+	case models.JSON:
+		return map[string]interface{}(typed)
+	default:
+		return map[string]interface{}{}
+	}
+}
+
+// applyResellerAnnouncementToPublicConfig 将分销站公告以主站同构的
+// {type,title,content,version} 写入 public config；未启用或内容为空时移除该字段。
+func applyResellerAnnouncementToPublicConfig(out map[string]interface{}, raw models.JSON) {
+	delete(out, "announcement")
+	if !parseSettingBool(raw["enabled"]) {
+		return
+	}
+	content := resellerAnnouncementLocalizedMap(raw["content"])
+	if !hasHomeAnnouncementContent(content) {
+		return
+	}
+	title := resellerAnnouncementLocalizedMap(raw["title"])
+	annType, _ := raw["type"].(string)
+	if annType == "" {
+		annType = "info"
+	}
+	out["announcement"] = map[string]interface{}{
+		"type":    annType,
+		"title":   title,
+		"content": content,
+		"version": homeAnnouncementVersion(annType, title, content),
+	}
+}
+
 func applyResellerSiteConfigToPublicConfig(out map[string]interface{}, cfg *models.ResellerSiteConfig) {
 	if cfg == nil {
 		return
@@ -452,17 +483,14 @@ func applyResellerSiteConfigToPublicConfig(out map[string]interface{}, cfg *mode
 		out["seo"] = cfg.SEOJSON
 	}
 	// A saved reseller config intentionally owns announcement and navigation:
-	// default disabled announcement and default builtin nav prevent stale main-site content from leaking into a white-label site.
-	if len(cfg.AnnouncementJSON) > 0 {
-		out["announcement"] = cfg.AnnouncementJSON
-	}
+	// a disabled/empty announcement removes the field so main-site content never
+	// leaks into a white-label site; an enabled one is emitted in the same
+	// {type,title,content,version} shape the storefront expects (see GetActiveHomeAnnouncement).
+	applyResellerAnnouncementToPublicConfig(out, cfg.AnnouncementJSON)
 	if len(cfg.FooterLinksJSON) > 0 {
 		out["footer_links"] = footerItemsFromEnvelope(cfg.FooterLinksJSON)
 	}
 	if len(cfg.NavConfigJSON) > 0 {
 		out["nav_config"] = cfg.NavConfigJSON
-	}
-	if len(cfg.ThemeJSON) > 0 {
-		out["theme"] = cfg.ThemeJSON
 	}
 }

@@ -140,6 +140,18 @@ func (r *resellerPricingRepoStub) GetOrderSnapshotByOrderID(orderID uint) (*mode
 	return nil, nil
 }
 
+func (r *resellerPricingRepoStub) ListOrderSnapshotsByReseller(filter repository.ResellerOrderListFilter) ([]repository.ResellerOrderSnapshotRow, int64, error) {
+	return []repository.ResellerOrderSnapshotRow{}, 0, nil
+}
+
+func (r *resellerPricingRepoStub) StatsOrderSnapshotsByReseller(filter repository.ResellerOrderListFilter) (repository.ResellerOrderStatsRow, error) {
+	return repository.ResellerOrderStatsRow{ByStatus: map[string]int64{}, ByCurrency: map[string]int64{}}, nil
+}
+
+func (r *resellerPricingRepoStub) GetOrderSnapshotByResellerOrderNo(resellerID uint, orderNo string) (*repository.ResellerOrderSnapshotRow, error) {
+	return nil, nil
+}
+
 func (r *resellerPricingRepoStub) CreateLedgerEntryIfNotExists(entry *models.ResellerLedgerEntry) (bool, error) {
 	return false, errors.New("not implemented")
 }
@@ -152,12 +164,24 @@ func (r *resellerPricingRepoStub) MarkDueLedgerEntriesAvailable(now time.Time) (
 	return 0, nil
 }
 
+func (r *resellerPricingRepoStub) ListDueLedgerScopes(now time.Time) ([]repository.ResellerLedgerScope, error) {
+	return nil, nil
+}
+
 func (r *resellerPricingRepoStub) ListLedgerEntries(filter repository.ResellerLedgerListFilter) ([]models.ResellerLedgerEntry, int64, error) {
 	return []models.ResellerLedgerEntry{}, 0, nil
 }
 
 func (r *resellerPricingRepoStub) SumLedgerAmount(resellerID uint, currency string, statuses []string) (decimal.Decimal, error) {
 	return decimal.Zero, nil
+}
+
+func (r *resellerPricingRepoStub) SumLedgerAmountByOrderAndType(orderID uint, ledgerType string) (decimal.Decimal, error) {
+	return decimal.Zero, nil
+}
+
+func (r *resellerPricingRepoStub) SumLedgerAmountGroupedByStatus(resellerID uint, currency string, statuses []string) (map[string]decimal.Decimal, error) {
+	return map[string]decimal.Decimal{}, nil
 }
 
 func (r *resellerPricingRepoStub) GetOrCreateBalanceAccountForUpdate(resellerID uint, currency string) (*models.ResellerBalanceAccount, error) {
@@ -774,5 +798,47 @@ func TestResellerPricingResolverDisplayBatchUsesSingleSettingsLookup(t *testing.
 	}
 	if second.Visible {
 		t.Fatalf("all hidden sku product should not be visible: %+v", second)
+	}
+}
+
+func TestResellerPricingResolverDisplayHidesInvalidSKUWithoutFailing(t *testing.T) {
+	// 模拟保存后失效的脏配置：SKU 12 的固定价低于基准价（如基准价被上调）。
+	repo := &resellerPricingRepoStub{
+		profile: testResellerProfile(),
+		settings: []models.ResellerProductSetting{
+			{ID: 1, ResellerID: 10, ProductID: 1, SKUID: 11, IsListed: true, PricingMode: models.ResellerPricingModeFixedPrice, FixedPriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(130))},
+			{ID: 2, ResellerID: 10, ProductID: 1, SKUID: 12, IsListed: true, PricingMode: models.ResellerPricingModeFixedPrice, FixedPriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(80))},
+		},
+	}
+	resolver := NewResellerPricingResolver(repo)
+	products := []models.Product{
+		{
+			ID:          1,
+			PriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(100)),
+			SKUs: []models.ProductSKU{
+				{ID: 11, ProductID: 1, PriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(100)), CostPriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(50)), IsActive: true},
+				{ID: 12, ProductID: 1, PriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(100)), CostPriceAmount: models.NewMoneyFromDecimal(decimal.NewFromInt(50)), IsActive: true},
+			},
+		},
+	}
+	batch, err := resolver.LoadDisplayPricingBatch(testResellerTenant(), products)
+	if err != nil {
+		t.Fatalf("LoadDisplayPricingBatch failed: %v", err)
+	}
+	result, err := resolver.ResolveDisplayPrices(testResellerTenant(), &products[0], batch)
+	if err != nil {
+		t.Fatalf("ResolveDisplayPrices should degrade gracefully, got error: %v", err)
+	}
+	if result == nil || !result.Visible {
+		t.Fatalf("expected product visible via the valid sku, got %+v", result)
+	}
+	if !result.HiddenSKUIDs[12] {
+		t.Fatalf("expected invalid sku 12 hidden, got %+v", result.HiddenSKUIDs)
+	}
+	if _, ok := result.SKUPrices[12]; ok {
+		t.Fatalf("invalid sku 12 should not carry a price, got %+v", result.SKUPrices)
+	}
+	if result.DisplaySKUID != 11 || !result.DisplayPrice.Decimal.Equal(decimal.NewFromInt(130)) {
+		t.Fatalf("expected display fall back to valid sku 11@130, got %+v", result)
 	}
 }

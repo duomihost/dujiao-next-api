@@ -52,7 +52,6 @@ func TestResellerSiteConfigServiceNormalizesAndStoresSafeFields(t *testing.T) {
 			Title:       LocalizedTextInput{"zh-CN": "爱丽丝商店", "zh-TW": "愛麗絲商店", "en-US": "Alice Store"},
 			Description: LocalizedTextInput{"zh-CN": "精选商品", "en-US": "Curated products"},
 		},
-		Theme: ResellerThemeInput{PrimaryColor: "#2563eb", AccentColor: "#16a34a", SurfaceColor: "red"},
 	})
 	if err != nil {
 		t.Fatalf("update site config failed: %v", err)
@@ -67,8 +66,8 @@ func TestResellerSiteConfigServiceNormalizesAndStoresSafeFields(t *testing.T) {
 	if _, exists := announcementTitle["fr-FR"]; exists {
 		t.Fatalf("unexpected unsupported locale retained: %+v", announcementTitle)
 	}
-	if row.ThemeJSON["primary_color"] != "#2563eb" || row.ThemeJSON["surface_color"] != nil {
-		t.Fatalf("unexpected theme json: %+v", row.ThemeJSON)
+	if len(row.ThemeJSON) != 0 {
+		t.Fatalf("expected theme config to be ignored, got: %+v", row.ThemeJSON)
 	}
 }
 
@@ -87,6 +86,31 @@ func TestResellerSiteConfigServiceRejectsUnsafeURLs(t *testing.T) {
 	})
 	if !errors.Is(err, ErrResellerSiteConfigInvalid) {
 		t.Fatalf("expected invalid site config error, got %v", err)
+	}
+}
+
+func TestResellerSiteConfigServiceReturnsFieldErrorForInvalidSupport(t *testing.T) {
+	db := openResellerManagementServiceTestDB(t)
+	repo := repository.NewResellerRepository(db)
+	user := seedResellerManagementUser(t, db, "site-config-field@example.test")
+	profile := models.ResellerProfile{UserID: user.ID, Status: models.ResellerProfileStatusActive, SettlementStatus: models.ResellerSettlementStatusNormal}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatalf("create profile failed: %v", err)
+	}
+	svc := NewResellerSiteConfigService(repo)
+	_, err := svc.UpdateUserSiteConfig(context.Background(), user.ID, ResellerSiteConfigInput{
+		SiteName: "Field Store",
+		Support:  ResellerSupportInput{WhatsApp: "https://w.me/123"},
+	})
+	if !errors.Is(err, ErrResellerSiteConfigInvalid) {
+		t.Fatalf("expected invalid site config error, got %v", err)
+	}
+	var fieldErr *ResellerSiteConfigFieldError
+	if !errors.As(err, &fieldErr) {
+		t.Fatalf("expected field error, got %v", err)
+	}
+	if fieldErr.Field != "support_whatsapp" {
+		t.Fatalf("expected support_whatsapp field, got %q", fieldErr.Field)
 	}
 }
 
@@ -138,8 +162,8 @@ func TestResellerSiteConfigServiceApplyPublicConfigOverlay(t *testing.T) {
 	if title["zh-CN"] != "覆盖标题" || title["en-US"] != "Overlay Title" {
 		t.Fatalf("unexpected localized seo overlay: %+v", seo)
 	}
-	if announcement := resellerSiteConfigTestMap(out["announcement"]); announcement["enabled"] != false {
-		t.Fatalf("saved reseller config should intentionally own announcement defaults, got %+v", announcement)
+	if _, exists := out["announcement"]; exists {
+		t.Fatalf("disabled reseller announcement should remove the field, got %+v", out["announcement"])
 	}
 	if nav := resellerSiteConfigTestMap(out["nav_config"]); nav["builtin"] == nil {
 		t.Fatalf("saved reseller config should intentionally own nav defaults, got %+v", nav)
@@ -147,6 +171,53 @@ func TestResellerSiteConfigServiceApplyPublicConfigOverlay(t *testing.T) {
 	tenantPayload := out["tenant"].(map[string]interface{})
 	if tenantPayload["mode"] != "reseller" || tenantPayload["host"] != "shop.example.test" {
 		t.Fatalf("unexpected tenant payload: %+v", tenantPayload)
+	}
+}
+
+func TestResellerSiteConfigServiceOverlayEmitsActiveAnnouncement(t *testing.T) {
+	db := openResellerManagementServiceTestDB(t)
+	repo := repository.NewResellerRepository(db)
+	user := seedResellerManagementUser(t, db, "site-config-announcement@example.test")
+	profile := models.ResellerProfile{UserID: user.ID, Status: models.ResellerProfileStatusActive, SettlementStatus: models.ResellerSettlementStatusNormal}
+	if err := db.Create(&profile).Error; err != nil {
+		t.Fatalf("create profile failed: %v", err)
+	}
+	svc := NewResellerSiteConfigService(repo)
+	if _, err := svc.UpdateUserSiteConfig(context.Background(), user.ID, ResellerSiteConfigInput{
+		SiteName: "Announcement Store",
+		Announcement: ResellerAnnouncementInput{
+			Enabled: true,
+			Type:    "success",
+			Title:   LocalizedTextInput{"zh-CN": "测试"},
+			Content: LocalizedTextInput{"zh-CN": "<p>测试测试</p>"},
+		},
+	}); err != nil {
+		t.Fatalf("save config failed: %v", err)
+	}
+	tenant := ResellerTenantContext("shop.example.test", profile.ID, user.ID, "shop.example.test")
+	out, err := svc.ApplyPublicConfigOverlay(context.Background(), tenant, map[string]interface{}{
+		"announcement": map[string]interface{}{"type": "info", "version": "main0000"},
+	})
+	if err != nil {
+		t.Fatalf("apply overlay failed: %v", err)
+	}
+	announcement := resellerSiteConfigTestMap(out["announcement"])
+	if announcement == nil {
+		t.Fatalf("enabled reseller announcement should be emitted, got %+v", out["announcement"])
+	}
+	if announcement["type"] != "success" {
+		t.Fatalf("unexpected announcement type: %+v", announcement)
+	}
+	if _, exists := announcement["enabled"]; exists {
+		t.Fatalf("public announcement should not expose enabled flag, got %+v", announcement)
+	}
+	version, _ := announcement["version"].(string)
+	if len(version) != 8 || version == "main0000" {
+		t.Fatalf("expected reseller-derived version fingerprint, got %q", version)
+	}
+	content := resellerSiteConfigTestMap(announcement["content"])
+	if content["zh-CN"] != "<p>测试测试</p>" {
+		t.Fatalf("unexpected announcement content: %+v", content)
 	}
 }
 

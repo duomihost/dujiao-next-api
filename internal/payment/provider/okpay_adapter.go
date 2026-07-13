@@ -107,12 +107,14 @@ func (a *okpayAdapter) CreatePayment(ctx context.Context, raw models.JSON, input
 	// okpay native 已做 conversion，wrapper 这里只是**重新计算一遍**以填 AmountSent/CurrencySent，
 	// 不影响实际发给网关的数字（那由 native 决定）。
 	amountSent := originalAmount
-	currencySent := originalCurrency
+	currencySent := strings.ToUpper(strings.TrimSpace(originalCurrency))
+	if coin := strings.ToUpper(strings.TrimSpace(cfg.Coin)); coin != "" {
+		currencySent = coin
+	}
 	converted := false
 	if rate := strings.TrimSpace(cfg.ExchangeRate); rate != "" && rate != "1" && rate != "1.0" {
 		if convertedDec, convErr := okpay.ConvertAmountByRate(originalAmount, cfg.ExchangeRate); convErr == nil {
 			amountSent = convertedDec.StringFixed(8)
-			currencySent = strings.ToUpper(strings.TrimSpace(cfg.Coin))
 			converted = true
 		}
 	}

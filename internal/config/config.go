@@ -278,6 +278,8 @@ type ResellerConfig struct {
 	TrustedForwardedHost bool     `mapstructure:"trusted_forwarded_host"`
 	SubdomainBase        string   `mapstructure:"subdomain_base"`
 	SelfApplyEnabled     bool     `mapstructure:"self_apply_enabled"`
+	// SettlementConfirmDays 分销利润入账后转为可提现的确认天数（0 表示即时到账）。
+	SettlementConfirmDays int `mapstructure:"settlement_confirm_days"`
 }
 
 // Load 从 config.yml 加载配置
@@ -402,6 +404,7 @@ func Load() *Config {
 	viper.SetDefault("reseller.trusted_forwarded_host", false)
 	viper.SetDefault("reseller.subdomain_base", "")
 	viper.SetDefault("reseller.self_apply_enabled", true)
+	viper.SetDefault("reseller.settlement_confirm_days", 7)
 
 	// 环境变量支持
 	viper.AutomaticEnv()                                   // 自动读取环境变量

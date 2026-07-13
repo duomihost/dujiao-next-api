@@ -33,8 +33,11 @@ func openPublicResellerHandlerTestDB(t *testing.T) *gorm.DB {
 	}
 	if err := db.AutoMigrate(
 		&models.User{},
+		&models.Order{},
+		&models.OrderItem{},
 		&models.ResellerProfile{},
 		&models.ResellerDomain{},
+		&models.ResellerOrderSnapshot{},
 		&models.ResellerLedgerEntry{},
 		&models.ResellerWithdrawRequest{},
 		&models.ResellerBalanceAccount{},
@@ -93,8 +96,71 @@ func newPublicResellerHandlerForTest(db *gorm.DB) *Handler {
 	return &Handler{
 		Container: &provider.Container{
 			ResellerAccountingService: service.NewResellerAccountingService(repo, service.ResellerAccountingOptions{}),
+			ResellerOrderService:      service.NewResellerOrderService(repo),
 		},
 	}
+}
+
+func seedPublicResellerHandlerOrderSnapshot(t *testing.T, db *gorm.DB, profile models.ResellerProfile) models.Order {
+	t.Helper()
+	paidAt := time.Now().Add(-time.Hour)
+	order := models.Order{
+		OrderNo:              fmt.Sprintf("DJ-PUBLIC-RESELLER-ORDER-%d", time.Now().UnixNano()),
+		UserID:               1000,
+		Status:               constants.OrderStatusPaid,
+		Currency:             "USD",
+		TotalAmount:          models.NewMoneyFromDecimal(decimal.RequireFromString("130.00")),
+		ResellerID:           &profile.ID,
+		ResellerDomain:       "shop.example.test",
+		ResellerProfitAmount: models.NewMoneyFromDecimal(decimal.RequireFromString("30.00")),
+		PaidAt:               &paidAt,
+	}
+	if err := db.Create(&order).Error; err != nil {
+		t.Fatalf("create order failed: %v", err)
+	}
+	item := models.OrderItem{
+		OrderID:         order.ID,
+		ProductID:       10,
+		SKUID:           20,
+		TitleJSON:       models.JSON{"zh-CN": "测试商品"},
+		SKUSnapshotJSON: models.JSON{"规格": "A"},
+		Quantity:        2,
+		UnitPrice:       models.NewMoneyFromDecimal(decimal.RequireFromString("65.00")),
+		TotalPrice:      models.NewMoneyFromDecimal(decimal.RequireFromString("130.00")),
+		CostPrice:       models.NewMoneyFromDecimal(decimal.RequireFromString("1.00")),
+	}
+	if err := db.Create(&item).Error; err != nil {
+		t.Fatalf("create order item failed: %v", err)
+	}
+	repo := repository.NewResellerRepository(db)
+	if err := repo.CreateOrderSnapshot(&models.ResellerOrderSnapshot{
+		OrderID:           order.ID,
+		ResellerID:        profile.ID,
+		Domain:            order.ResellerDomain,
+		Currency:          order.Currency,
+		ResellerUserID:    profile.UserID,
+		BuyerUserID:       order.UserID,
+		BaseAmount:        models.NewMoneyFromDecimal(decimal.RequireFromString("100.00")),
+		ResellerAmount:    models.NewMoneyFromDecimal(decimal.RequireFromString("130.00")),
+		ProfitAmount:      models.NewMoneyFromDecimal(decimal.RequireFromString("30.00")),
+		ProfitEligible:    false,
+		ProfitBlockReason: "self_dealing_owner",
+		PricingSnapshotJSON: models.JSON{"items": []interface{}{
+			map[string]interface{}{
+				"order_item_id":          item.ID,
+				"base_unit_amount":       "50.00",
+				"reseller_unit_amount":   "65.00",
+				"base_total_amount":      "100.00",
+				"reseller_total_amount":  "130.00",
+				"profit_amount":          "30.00",
+				"profit_block_reason":    "self_dealing_owner",
+				"internal_risk_decision": "blocked",
+			},
+		}},
+	}); err != nil {
+		t.Fatalf("create snapshot failed: %v", err)
+	}
+	return order
 }
 
 func TestPublicResellerApplyAndSnapshot(t *testing.T) {
@@ -202,6 +268,78 @@ func TestPublicResellerFinanceDashboard(t *testing.T) {
 	}
 	if len(resp.Data.Balances) != 1 || resp.Data.Balances[0].Currency != "USD" || resp.Data.Balances[0].AvailableAmount != "120.50" {
 		t.Fatalf("unexpected balances: %+v", resp.Data.Balances)
+	}
+}
+
+func TestPublicResellerOrdersListDoesNotExposeRiskFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openPublicResellerHandlerTestDB(t)
+	profile := seedPublicResellerHandlerProfile(t, db)
+	order := seedPublicResellerHandlerOrderSnapshot(t, db, profile)
+	otherProfile := seedPublicResellerHandlerProfile(t, db)
+	otherOrder := seedPublicResellerHandlerOrderSnapshot(t, db, otherProfile)
+
+	h := newPublicResellerHandlerForTest(db)
+	c, recorder := newPublicResellerHandlerTestContext(http.MethodGet, "/api/v1/reseller/orders", nil, profile.UserID)
+	h.ListResellerOrders(c)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, forbidden := range []string{"profit_eligible", "profit_block_reason", "self_dealing_owner", "internal_risk_decision"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("response leaked %s: %s", forbidden, body)
+		}
+	}
+	if !strings.Contains(body, order.OrderNo) || strings.Contains(body, otherOrder.OrderNo) {
+		t.Fatalf("unexpected reseller order isolation body: %s", body)
+	}
+	if !strings.Contains(body, `"profit_status":"unavailable"`) || !strings.Contains(body, `"base_amount":"100.00"`) {
+		t.Fatalf("expected neutral reseller order fields, got %s", body)
+	}
+}
+
+func TestPublicResellerOrderDetailDoesNotExposeCostOrRiskFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openPublicResellerHandlerTestDB(t)
+	profile := seedPublicResellerHandlerProfile(t, db)
+	order := seedPublicResellerHandlerOrderSnapshot(t, db, profile)
+
+	h := newPublicResellerHandlerForTest(db)
+	c, recorder := newPublicResellerHandlerTestContext(http.MethodGet, "/api/v1/reseller/orders/"+order.OrderNo, nil, profile.UserID)
+	c.Params = gin.Params{{Key: "order_no", Value: order.OrderNo}}
+	h.GetResellerOrderDetail(c)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	for _, forbidden := range []string{"cost_price", "profit_eligible", "profit_block_reason", "self_dealing_owner", "internal_risk_decision"} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("response leaked %s: %s", forbidden, body)
+		}
+	}
+	if !strings.Contains(body, `"base_unit_amount":"50.00"`) || !strings.Contains(body, `"reseller_unit_amount":"65.00"`) {
+		t.Fatalf("expected item pricing snapshot fields, got %s", body)
+	}
+}
+
+func TestPublicResellerOrderStatsUsesCurrentProfile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := openPublicResellerHandlerTestDB(t)
+	profile := seedPublicResellerHandlerProfile(t, db)
+	_ = seedPublicResellerHandlerOrderSnapshot(t, db, profile)
+	otherProfile := seedPublicResellerHandlerProfile(t, db)
+	_ = seedPublicResellerHandlerOrderSnapshot(t, db, otherProfile)
+
+	h := newPublicResellerHandlerForTest(db)
+	c, recorder := newPublicResellerHandlerTestContext(http.MethodGet, "/api/v1/reseller/orders/stats", nil, profile.UserID)
+	h.GetResellerOrderStats(c)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, `"total":1`) || !strings.Contains(body, `"paid":1`) || !strings.Contains(body, `"USD":1`) {
+		t.Fatalf("unexpected stats response: %s", body)
 	}
 }
 

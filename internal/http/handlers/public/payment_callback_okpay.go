@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"net/url"
 	"strings"
 
 	"github.com/dujiao-next/internal/constants"
 	"github.com/dujiao-next/internal/http/handlers/shared"
 	"github.com/dujiao-next/internal/models"
+	"github.com/dujiao-next/internal/payment/okpay"
 
 	"github.com/gin-gonic/gin"
 )
@@ -23,21 +23,20 @@ func (h *Handler) HandleOkpayCallback(c *gin.Context) bool {
 	}
 	c.Request.Body = io.NopCloser(bytes.NewBuffer(body))
 
-	// 轻量级特征检测：从 form 或 JSON body 中探测 sign + data[unique_id] + data[order_id]
-	// okpay callback 是 form POST（application/x-www-form-urlencoded）
+	// 轻量级特征检测：okpay callback 可能是 form 或 JSON body。
 	trimmed := strings.TrimSpace(string(body))
 	if trimmed == "" {
 		log.Debugw("okpay_callback_not_matched", "reason", "empty_body")
 		return false
 	}
-	probeForm, parseErr := url.ParseQuery(trimmed)
+	probe, parseErr := okpay.ParseCallback(body)
 	if parseErr != nil {
 		log.Debugw("okpay_callback_parse_failed", "error", parseErr)
 		return false
 	}
-	sign := strings.TrimSpace(probeForm.Get("sign"))
-	uniqueID := strings.TrimSpace(probeForm.Get("data[unique_id]"))
-	orderID := strings.TrimSpace(probeForm.Get("data[order_id]"))
+	sign := strings.TrimSpace(probe.Sign)
+	uniqueID := strings.TrimSpace(probe.UniqueID)
+	orderID := strings.TrimSpace(probe.OrderID)
 	if sign == "" || (uniqueID == "" && orderID == "") {
 		log.Debugw("okpay_callback_not_matched", "reason", "missing_sign_or_ids")
 		return false

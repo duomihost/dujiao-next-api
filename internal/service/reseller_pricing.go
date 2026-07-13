@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dujiao-next/internal/logger"
 	"github.com/dujiao-next/internal/models"
 	"github.com/dujiao-next/internal/repository"
 	"github.com/shopspring/decimal"
@@ -298,11 +299,20 @@ func (r *ResellerPricingResolver) ResolveDisplayPrices(tenant TenantContext, pro
 			continue
 		}
 		price, _, err := resolveResellerUnitAmount(batch.Profile, productSetting, skuSetting, sku.PriceAmount.Decimal.Round(2))
-		if err != nil {
-			return nil, err
+		if err == nil {
+			err = validateResellerUnitAmount(batch.Profile, &sku, sku.PriceAmount.Decimal.Round(2), price)
 		}
-		if err := validateResellerUnitAmount(batch.Profile, &sku, sku.PriceAmount.Decimal.Round(2), price); err != nil {
-			return nil, err
+		if err != nil {
+			// 定价配置可能在保存后因基准价/成本价/上限调整而失效；
+			// 展示路径不应整单失败，仅隐藏该 SKU 并记录告警，便于运营发现需修正的脏配置。
+			logger.Warnw("reseller_display_price_sku_hidden",
+				"reseller_id", batch.Profile.ID,
+				"product_id", product.ID,
+				"sku_id", sku.ID,
+				"error", err.Error(),
+			)
+			result.HiddenSKUIDs[sku.ID] = true
+			continue
 		}
 		money := models.NewMoneyFromDecimal(price)
 		result.SKUPrices[sku.ID] = money
@@ -315,7 +325,12 @@ func (r *ResellerPricingResolver) ResolveDisplayPrices(tenant TenantContext, pro
 	if len(product.SKUs) == 0 {
 		price, _, err := resolveResellerUnitAmount(batch.Profile, productSetting, nil, product.PriceAmount.Decimal.Round(2))
 		if err != nil {
-			return nil, err
+			logger.Warnw("reseller_display_price_product_hidden",
+				"reseller_id", batch.Profile.ID,
+				"product_id", product.ID,
+				"error", err.Error(),
+			)
+			return &ResellerDisplayPriceResult{Visible: false, ProductID: product.ID}, nil
 		}
 		result.Visible = true
 		result.DisplayPrice = models.NewMoneyFromDecimal(price)

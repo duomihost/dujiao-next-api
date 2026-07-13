@@ -192,6 +192,75 @@ func TestResellerProductSettingServiceRejectsBatchWithoutPartialWrites(t *testin
 	}
 }
 
+func findPreviewItem(items []ResellerProductSettingPreviewItem, skuID uint) *ResellerProductSettingPreviewItem {
+	for i := range items {
+		if items[i].SKUID == skuID {
+			return &items[i]
+		}
+	}
+	return nil
+}
+
+func TestResellerProductSettingServicePreviewMatchesSaveSemantics(t *testing.T) {
+	db := openResellerProductSettingServiceTestDB(t)
+	user, profile, product, skus := seedResellerProductSettingServiceData(t, db)
+	svc := newResellerProductSettingServiceForTest(db)
+
+	items, err := svc.PreviewUserProductSettings(user.ID, product.ID, ResellerProductSettingSaveInput{
+		Settings: []ResellerProductSettingInput{
+			{SKUID: 0, IsListed: true, PricingMode: models.ResellerPricingModeMarkupPercent, MarkupPercent: decimal.RequireFromString("20.00")},
+			{SKUID: skus[0].ID, IsListed: true, PricingMode: models.ResellerPricingModeFixedPrice, FixedPriceAmount: decimal.RequireFromString("130.00")},
+			{SKUID: skus[1].ID, IsListed: true, PricingMode: models.ResellerPricingModeInherit},
+		},
+	})
+	if err != nil {
+		t.Fatalf("preview failed: %v", err)
+	}
+
+	skuA := findPreviewItem(items, skus[0].ID)
+	if skuA == nil || !skuA.Valid || skuA.EffectivePrice.StringFixed(2) != "130.00" {
+		t.Fatalf("sku A preview want valid 130.00, got %+v", skuA)
+	}
+	skuB := findPreviewItem(items, skus[1].ID)
+	if skuB == nil || !skuB.Valid || skuB.EffectivePrice.StringFixed(2) != "240.00" {
+		t.Fatalf("sku B inherit preview want valid 240.00, got %+v", skuB)
+	}
+
+	// 预览不得落库。
+	var count int64
+	if err := db.Model(&models.ResellerProductSetting{}).Where("reseller_id = ?", profile.ID).Count(&count).Error; err != nil {
+		t.Fatalf("count settings failed: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("preview must not persist settings, found %d rows", count)
+	}
+}
+
+func TestResellerProductSettingServicePreviewFlagsInvalidRules(t *testing.T) {
+	db := openResellerProductSettingServiceTestDB(t)
+	user, _, product, skus := seedResellerProductSettingServiceData(t, db)
+	svc := newResellerProductSettingServiceForTest(db)
+
+	// 低于基准价 → price_invalid；超出封顶加价 → markup_exceeded。
+	items, err := svc.PreviewUserProductSettings(user.ID, product.ID, ResellerProductSettingSaveInput{
+		Settings: []ResellerProductSettingInput{
+			{SKUID: skus[0].ID, IsListed: true, PricingMode: models.ResellerPricingModeFixedPrice, FixedPriceAmount: decimal.RequireFromString("99.99")},
+			{SKUID: skus[1].ID, IsListed: true, PricingMode: models.ResellerPricingModeFixedPrice, FixedPriceAmount: decimal.RequireFromString("300.00")},
+		},
+	})
+	if err != nil {
+		t.Fatalf("preview failed: %v", err)
+	}
+	skuA := findPreviewItem(items, skus[0].ID)
+	if skuA == nil || skuA.Valid || skuA.ErrorCode != "price_invalid" {
+		t.Fatalf("sku A want invalid price_invalid, got %+v", skuA)
+	}
+	skuB := findPreviewItem(items, skus[1].ID)
+	if skuB == nil || skuB.Valid || skuB.ErrorCode != "markup_exceeded" {
+		t.Fatalf("sku B want invalid markup_exceeded, got %+v", skuB)
+	}
+}
+
 func TestResellerProductSettingServiceRequiresActiveProfile(t *testing.T) {
 	db := openResellerProductSettingServiceTestDB(t)
 	user, profile, product, _ := seedResellerProductSettingServiceData(t, db)

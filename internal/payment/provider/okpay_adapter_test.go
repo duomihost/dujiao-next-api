@@ -165,6 +165,94 @@ func TestOkpayAdapter_CreatePayment_NoExchangeRate_AmountSentEqualsOriginal(t *t
 	}
 }
 
+// TestOkpayAdapter_CreatePayment_ExchangeRateOneUsesCoinCurrency reproduces the demo callback failure:
+// the shop order is stored as USD, but okpay receives coin=USDT and callbacks with coin=USDT.
+// Even when exchange_rate=1, the payment row must be updated to the gateway coin to avoid callback currency mismatch.
+func TestOkpayAdapter_CreatePayment_ExchangeRateOneUsesCoinCurrency(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","code":200,"data":{"order_id":"OK-ORDER-USD-USDT","pay_url":"https://pay.example.com/usd-usdt"}}`))
+	}))
+	defer server.Close()
+
+	a := NewOkpayAdapter()
+	raw := models.JSON{
+		"gateway_url":    server.URL,
+		"merchant_id":    "shop-usd-usdt",
+		"merchant_token": "token-usd-usdt",
+		"return_url":     "https://shop.example.com/pay",
+		"callback_url":   "https://api.example.com/api/v1/payments/callback/okpay",
+		"exchange_rate":  "1",
+		"coin":           "USDT",
+	}
+
+	input := CreateInput{
+		OrderNo:     "USD-ORDER-1",
+		Subject:     "test",
+		ChannelType: "usdt",
+		Currency:    "USD",
+		Amount:      models.NewMoneyFromDecimal(decimal.NewFromFloat(1)),
+		ReturnURL:   "https://shop.example.com/pay",
+	}
+
+	result, err := a.CreatePayment(context.Background(), raw, input)
+	if err != nil {
+		t.Fatalf("CreatePayment() failed: %v", err)
+	}
+
+	if result.AmountSent != "1" {
+		t.Fatalf("AmountSent should remain original amount '1', got %s", result.AmountSent)
+	}
+	if result.CurrencySent != "USDT" {
+		t.Fatalf("CurrencySent should use okpay coin USDT, got %s", result.CurrencySent)
+	}
+	if _, ok := result.Payload["exchange_rate"]; ok {
+		t.Fatal("Payload should NOT contain exchange_rate audit field when no amount conversion")
+	}
+}
+
+func TestOkpayAdapter_CreatePayment_ExchangeRateOneResolvesTRXChannelCurrency(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","code":200,"data":{"order_id":"OK-ORDER-USD-TRX","pay_url":"https://pay.example.com/usd-trx"}}`))
+	}))
+	defer server.Close()
+
+	a := NewOkpayAdapter()
+	raw := models.JSON{
+		"gateway_url":    server.URL,
+		"merchant_id":    "shop-usd-trx",
+		"merchant_token": "token-usd-trx",
+		"return_url":     "https://shop.example.com/pay",
+		"callback_url":   "https://api.example.com/api/v1/payments/callback/okpay",
+		"exchange_rate":  "1",
+	}
+
+	input := CreateInput{
+		OrderNo:     "USD-ORDER-TRX-1",
+		Subject:     "test",
+		ChannelType: constants.PaymentChannelTypeTrx,
+		Currency:    "USD",
+		Amount:      models.NewMoneyFromDecimal(decimal.NewFromFloat(1)),
+		ReturnURL:   "https://shop.example.com/pay",
+	}
+
+	result, err := a.CreatePayment(context.Background(), raw, input)
+	if err != nil {
+		t.Fatalf("CreatePayment() failed: %v", err)
+	}
+
+	if result.AmountSent != "1" {
+		t.Fatalf("AmountSent should remain original amount '1', got %s", result.AmountSent)
+	}
+	if result.CurrencySent != "TRX" {
+		t.Fatalf("CurrencySent should use resolved okpay coin TRX, got %s", result.CurrencySent)
+	}
+	if _, ok := result.Payload["exchange_rate"]; ok {
+		t.Fatal("Payload should NOT contain exchange_rate audit field when no amount conversion")
+	}
+}
+
 func TestOkpayAdapter_MapOkpayError(t *testing.T) {
 	cases := []struct {
 		name string

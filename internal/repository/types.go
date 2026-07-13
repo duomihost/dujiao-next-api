@@ -3,6 +3,7 @@ package repository
 import (
 	"time"
 
+	"github.com/dujiao-next/internal/models"
 	"github.com/shopspring/decimal"
 )
 
@@ -83,6 +84,37 @@ type ResellerLedgerListFilter struct {
 	Type       string
 	Status     string
 	OrderID    uint
+}
+
+// ResellerOrderListFilter 分销商视角销售订单过滤条件。
+type ResellerOrderListFilter struct {
+	Page        int
+	PageSize    int
+	ResellerID  uint
+	Status      string
+	OrderNo     string
+	Domain      string
+	Currency    string
+	CreatedFrom *time.Time
+	CreatedTo   *time.Time
+	PaidFrom    *time.Time
+	PaidTo      *time.Time
+}
+
+// ResellerOrderSnapshotRow 聚合订单快照、订单展示字段、商品行和账务流水。
+type ResellerOrderSnapshotRow struct {
+	Snapshot      models.ResellerOrderSnapshot
+	Order         models.Order
+	Items         []models.OrderItem
+	LedgerEntries []models.ResellerLedgerEntry
+	BuyerEmail    string
+}
+
+// ResellerOrderStatsRow 分销商视角销售订单统计。
+type ResellerOrderStatsRow struct {
+	Total      int64
+	ByStatus   map[string]int64
+	ByCurrency map[string]int64
 }
 
 // ResellerAdminLedgerListFilter 管理端分销商账务流水过滤条件。

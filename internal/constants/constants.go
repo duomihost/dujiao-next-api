@@ -436,6 +436,7 @@ const (
 	SettingKeyTelegramBotRuntimeStatus = "telegram_bot_runtime_status"
 	SettingKeyOrderEmailTemplateConfig = "order_email_template_config"
 	SettingFieldSiteCurrency           = "currency"
+	SettingFieldStorefrontTemplate     = "storefront_template"
 	SettingFieldPaymentExpireMinutes   = "payment_expire_minutes"
 
 	SettingKeyNavConfig = "nav_config"
@@ -454,6 +455,9 @@ const (
 	SettingKeyUpstreamSyncConfig        = "upstream_sync_config"
 	SettingFieldUpstreamSyncIntervalMin = "interval_minutes"
 	SettingFieldUpstreamPreOrderCheck   = "pre_order_stock_check_enabled"
+	SettingFieldUpstreamSyncPageSize    = "sync_page_size"
+	SettingFieldUpstreamSyncMaxPages    = "sync_max_pages"
+	SettingFieldUpstreamSyncConcurrency = "sync_conn_concurrency"
 
 	SettingKeyCallbackRoutesConfig = "callback_routes_config"
 
@@ -475,6 +479,13 @@ const (
 // 币种常量
 const (
 	SiteCurrencyDefault = "CNY"
+)
+
+// 店面模板常量（站长全局选择的用户前台模板）
+const (
+	StorefrontTemplateClassic = "classic"
+	StorefrontTemplateVault   = "vault"
+	StorefrontTemplateDefault = StorefrontTemplateClassic
 )
 
 // 站点语言常量

@@ -193,6 +193,111 @@ func TestPaymentCallbackHandlesOkpay(t *testing.T) {
 	}
 }
 
+func TestPaymentCallbackHandlesOkpayJSON(t *testing.T) {
+	fixture := newOkpayCallbackFixture(t)
+	body := signedOkpayJSONCallback("616.00000000", "USDT", "token-1")
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/callback", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+
+	fixture.handler.PaymentCallback(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", w.Code)
+	}
+	if strings.TrimSpace(w.Body.String()) != constants.OkpayCallbackSuccess {
+		t.Fatalf("unexpected response body: %s", w.Body.String())
+	}
+
+	updatedPayment, err := fixture.paymentRepo.GetByID(fixture.payment.ID)
+	if err != nil {
+		t.Fatalf("reload payment failed: %v", err)
+	}
+	if updatedPayment == nil || updatedPayment.Status != constants.PaymentStatusSuccess {
+		t.Fatalf("payment status not updated: %+v", updatedPayment)
+	}
+	updatedOrder, err := fixture.orderRepo.GetByID(fixture.order.ID)
+	if err != nil {
+		t.Fatalf("reload order failed: %v", err)
+	}
+	if updatedOrder == nil || updatedOrder.Status != constants.OrderStatusPaid {
+		t.Fatalf("order status not updated: %+v", updatedOrder)
+	}
+}
+
+func TestPaymentCallbackRejectsOkpayJSONInvalidSignature(t *testing.T) {
+	fixture := newOkpayCallbackFixture(t)
+	body := strings.Replace(signedOkpayJSONCallback("616.00000000", "USDT", "token-1"), `"sign":"`, `"sign":"BAD`, 1)
+	w := performOkpayJSONCallback(t, fixture, body)
+	assertOkpayCallbackRejected(t, fixture, w)
+}
+
+func TestPaymentCallbackRejectsOkpayJSONAmountMismatch(t *testing.T) {
+	fixture := newOkpayCallbackFixture(t)
+	body := signedOkpayJSONCallback("615.00000000", "USDT", "token-1")
+	w := performOkpayJSONCallback(t, fixture, body)
+	assertOkpayCallbackRejected(t, fixture, w)
+}
+
+func TestPaymentCallbackRejectsOkpayJSONCurrencyMismatch(t *testing.T) {
+	fixture := newOkpayCallbackFixture(t)
+	body := signedOkpayJSONCallback("616.00000000", "TRX", "token-1")
+	w := performOkpayJSONCallback(t, fixture, body)
+	assertOkpayCallbackRejected(t, fixture, w)
+}
+
+func performOkpayJSONCallback(t *testing.T, fixture *okpayCallbackFixture, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/payments/callback", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+	fixture.handler.PaymentCallback(c)
+	return w
+}
+
+func assertOkpayCallbackRejected(t *testing.T, fixture *okpayCallbackFixture, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected status 200 for okpay retry contract, got %d", w.Code)
+	}
+	if strings.TrimSpace(w.Body.String()) != constants.OkpayCallbackFail {
+		t.Fatalf("expected okpay fail response, got %s", w.Body.String())
+	}
+	updatedPayment, err := fixture.paymentRepo.GetByID(fixture.payment.ID)
+	if err != nil {
+		t.Fatalf("reload payment failed: %v", err)
+	}
+	if updatedPayment == nil || updatedPayment.Status != constants.PaymentStatusPending {
+		t.Fatalf("payment should remain pending: %+v", updatedPayment)
+	}
+	updatedOrder, err := fixture.orderRepo.GetByID(fixture.order.ID)
+	if err != nil {
+		t.Fatalf("reload order failed: %v", err)
+	}
+	if updatedOrder == nil || updatedOrder.Status != constants.OrderStatusPendingPayment {
+		t.Fatalf("order should remain pending payment: %+v", updatedOrder)
+	}
+}
+
+func signedOkpayJSONCallback(amount string, coin string, token string) string {
+	bodyWithoutSign := fmt.Sprintf(
+		`{"code":200,"data":{"order_id":"OKPAY-ORDER-1","unique_id":"DJP9001","pay_user_id":"7238234930","amount":%q,"coin":%q,"status":1,"type":"deposit"},"id":"shop-1","status":"success"}`,
+		amount,
+		coin,
+	)
+	signBase := fmt.Sprintf(
+		`code=200&data[order_id]=OKPAY-ORDER-1&data[unique_id]=DJP9001&data[pay_user_id]=7238234930&data[amount]=%s&data[coin]=%s&data[status]=1&data[type]=deposit&id=shop-1&status=success`,
+		amount,
+		coin,
+	)
+	sign := md5HexUpper(signBase + "&token=" + token)
+	return strings.TrimSuffix(bodyWithoutSign, "}") + `,"sign":"` + sign + `"}`
+}
+
 func md5HexUpper(raw string) string {
 	sum := md5.Sum([]byte(raw))
 	return strings.ToUpper(hex.EncodeToString(sum[:]))

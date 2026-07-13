@@ -142,6 +142,45 @@ func (h *Handler) UpdateResellerProductSettings(c *gin.Context) {
 	response.Success(c, dto.NewResellerProductSettingDetailResp(adminResellerProductSettingDTOInputFromDetail(detail)))
 }
 
+// PreviewResellerProductSettings 管理端计算某分销商拟用定价规则的预计生效价与校验结果（不落库）。
+func (h *Handler) PreviewResellerProductSettings(c *gin.Context) {
+	if h.ResellerProductSettingService == nil {
+		shared.RespondError(c, response.CodeInternal, "error.user_fetch_failed", nil)
+		return
+	}
+	resellerID, productID, ok := parseResellerProductSettingParams(c)
+	if !ok {
+		return
+	}
+	var req AdminResellerProductSettingsUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		shared.RespondBindError(c, err)
+		return
+	}
+	input, err := req.toServiceInput()
+	if err != nil {
+		shared.RespondError(c, response.CodeBadRequest, "error.bad_request", err)
+		return
+	}
+	items, err := h.ResellerProductSettingService.PreviewAdminProductSettings(resellerID, productID, input)
+	if err != nil {
+		respondAdminResellerProductSettingError(c, err)
+		return
+	}
+	previews := make([]dto.ResellerProductSettingPreviewInput, 0, len(items))
+	for _, item := range items {
+		previews = append(previews, dto.ResellerProductSettingPreviewInput{
+			SKUID:          item.SKUID,
+			IsListed:       item.IsListed,
+			BasePrice:      item.BasePrice.StringFixed(2),
+			EffectivePrice: item.EffectivePrice.StringFixed(2),
+			Valid:          item.Valid,
+			ErrorCode:      item.ErrorCode,
+		})
+	}
+	response.Success(c, dto.NewResellerProductSettingPreviewResp(previews))
+}
+
 // ResetResellerProductSetting 管理端删除某分销商的商品级或 SKU 级配置。
 func (h *Handler) ResetResellerProductSetting(c *gin.Context) {
 	if h.ResellerProductSettingService == nil {

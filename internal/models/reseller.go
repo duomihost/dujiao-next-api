@@ -160,6 +160,8 @@ type ResellerOrderSnapshot struct {
 	CreatedAt           time.Time      `gorm:"index" json:"created_at"`
 	UpdatedAt           time.Time      `gorm:"index" json:"updated_at"`
 	DeletedAt           gorm.DeletedAt `gorm:"index" json:"-"`
+
+	Order Order `gorm:"foreignKey:OrderID" json:"-"`
 }
 
 func (ResellerOrderSnapshot) TableName() string { return "reseller_order_snapshots" }

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 
@@ -59,6 +60,8 @@ type ResellerProductSettingAdminListInput struct {
 	Listed      string
 }
 
+type ResellerProductSettingSummary = repository.ResellerProductSettingSummary
+
 type ResellerProductSettingDetail struct {
 	Profile          *models.ResellerProfile
 	Product          models.Product
@@ -73,6 +76,17 @@ type ResellerProductSettingListRow struct {
 	Settings         []models.ResellerProductSetting
 	EffectiveBySKUID map[uint]decimal.Decimal
 	RuleBySKUID      map[uint]string
+}
+
+// ResellerProductSettingPreviewItem 表示某个商品级（SKUID=0）或 SKU 级规则在「拟用配置」下的预览结果。
+// 复用与保存/下单完全一致的 resolveResellerUnitAmount + validateResellerUnitAmount，确保预览价与实际成交价零分歧。
+type ResellerProductSettingPreviewItem struct {
+	SKUID          uint
+	IsListed       bool
+	BasePrice      decimal.Decimal
+	EffectivePrice decimal.Decimal
+	Valid          bool
+	ErrorCode      string
 }
 
 func (s *ResellerProductSettingService) ListUserProductSettings(userID uint, input ResellerProductSettingUserListInput) ([]ResellerProductSettingListRow, int64, error) {
@@ -102,6 +116,15 @@ func (s *ResellerProductSettingService) GetUserProductSetting(userID, productID 
 		return nil, err
 	}
 	return s.getDetail(profile, productID)
+}
+
+// PreviewUserProductSettings 在不落库的前提下，按用户拟用的定价规则计算各 SKU 的预计生效价与校验结果。
+func (s *ResellerProductSettingService) PreviewUserProductSettings(userID, productID uint, input ResellerProductSettingSaveInput) ([]ResellerProductSettingPreviewItem, error) {
+	profile, err := s.requireActiveProfileByUser(userID)
+	if err != nil {
+		return nil, err
+	}
+	return s.previewSettings(profile, productID, input)
 }
 
 func (s *ResellerProductSettingService) SaveUserProductSettings(userID, productID uint, input ResellerProductSettingSaveInput) (*ResellerProductSettingDetail, error) {
@@ -137,12 +160,28 @@ func (s *ResellerProductSettingService) ListAdminSettings(input ResellerProductS
 	})
 }
 
+func (s *ResellerProductSettingService) SummarizeAdminSettings(resellerID uint) (ResellerProductSettingSummary, error) {
+	if s == nil || s.settingRepo == nil || resellerID == 0 {
+		return ResellerProductSettingSummary{}, nil
+	}
+	return s.settingRepo.SummarizeByResellerID(resellerID)
+}
+
 func (s *ResellerProductSettingService) GetAdminProductSetting(resellerID, productID uint) (*ResellerProductSettingDetail, error) {
 	profile, err := s.requireActiveProfileByID(resellerID)
 	if err != nil {
 		return nil, err
 	}
 	return s.getDetail(profile, productID)
+}
+
+// PreviewAdminProductSettings 在不落库的前提下，按管理员拟用的定价规则计算各 SKU 的预计生效价与校验结果。
+func (s *ResellerProductSettingService) PreviewAdminProductSettings(resellerID, productID uint, input ResellerProductSettingSaveInput) ([]ResellerProductSettingPreviewItem, error) {
+	profile, err := s.requireActiveProfileByID(resellerID)
+	if err != nil {
+		return nil, err
+	}
+	return s.previewSettings(profile, productID, input)
 }
 
 func (s *ResellerProductSettingService) SaveAdminProductSettings(resellerID, productID uint, input ResellerProductSettingSaveInput) (*ResellerProductSettingDetail, error) {
@@ -325,6 +364,145 @@ func normalizeResellerProductSettingInput(profile *models.ResellerProfile, produ
 		}
 	}
 	return setting, nil
+}
+
+func (s *ResellerProductSettingService) previewSettings(profile *models.ResellerProfile, productID uint, input ResellerProductSettingSaveInput) ([]ResellerProductSettingPreviewItem, error) {
+	if profile == nil || productID == 0 {
+		return nil, ErrNotFound
+	}
+	row, err := s.settingRepo.GetProductWithSettings(profile.ID, productID)
+	if err != nil {
+		return nil, err
+	}
+	if row == nil {
+		return nil, ErrNotFound
+	}
+	product := row.Product
+
+	var productSetting *models.ResellerProductSetting
+	skuSettings := map[uint]*models.ResellerProductSetting{}
+	for _, item := range input.Settings {
+		setting, err := buildPreviewSetting(item)
+		if err != nil {
+			return nil, err
+		}
+		setting.ResellerID = profile.ID
+		setting.ProductID = product.ID
+		if item.SKUID == 0 {
+			ps := setting
+			productSetting = &ps
+		} else {
+			ss := setting
+			skuSettings[item.SKUID] = &ss
+		}
+	}
+
+	items := make([]ResellerProductSettingPreviewItem, 0, len(product.SKUs)+1)
+
+	// 商品级（SKUID = 0）
+	productBase := product.PriceAmount.Decimal.Round(2)
+	productItem := ResellerProductSettingPreviewItem{
+		SKUID:     0,
+		IsListed:  productSetting == nil || productSetting.IsListed,
+		BasePrice: productBase,
+		Valid:     true,
+	}
+	if productSetting != nil && productSetting.IsListed {
+		price, _, _ := resolveResellerUnitAmount(profile, productSetting, nil, productBase)
+		productItem.EffectivePrice = price.Round(2)
+		if len(product.SKUs) == 0 {
+			perr := validateResellerUnitAmount(profile, nil, productBase, price)
+			if perr == nil {
+				cost := product.CostPriceAmount.Decimal.Round(2)
+				if cost.GreaterThan(decimal.Zero) && price.LessThan(cost) {
+					perr = ErrResellerPriceBelowBase
+				}
+			}
+			productItem.Valid = perr == nil
+			productItem.ErrorCode = previewErrorCode(perr)
+		} else {
+			// 有 SKU 时商品级生效价以商品基准价展示，校验沿用「对每个 SKU 套用商品级规则都成立」。
+			productItem.Valid, productItem.ErrorCode = previewValidateProductRuleAcrossSKUs(profile, product, productSetting)
+		}
+	}
+	items = append(items, productItem)
+
+	for i := range product.SKUs {
+		sku := &product.SKUs[i]
+		if !sku.IsActive {
+			continue
+		}
+		skuSetting := skuSettings[sku.ID]
+		base := sku.PriceAmount.Decimal.Round(2)
+		item := ResellerProductSettingPreviewItem{SKUID: sku.ID, IsListed: true, BasePrice: base, Valid: true}
+		if (productSetting != nil && !productSetting.IsListed) || (skuSetting != nil && !skuSetting.IsListed) {
+			item.IsListed = false
+			items = append(items, item)
+			continue
+		}
+		price, _, perr := resolveResellerUnitAmount(profile, productSetting, skuSetting, base)
+		if perr == nil {
+			perr = validateResellerUnitAmount(profile, sku, base, price)
+		}
+		item.EffectivePrice = price.Round(2)
+		item.Valid = perr == nil
+		item.ErrorCode = previewErrorCode(perr)
+		items = append(items, item)
+	}
+	return items, nil
+}
+
+// buildPreviewSetting 将前端拟用输入转为内存中的 ResellerProductSetting（不落库），并校验定价模式合法性。
+func buildPreviewSetting(input ResellerProductSettingInput) (models.ResellerProductSetting, error) {
+	mode := strings.TrimSpace(input.PricingMode)
+	if mode == "" {
+		mode = models.ResellerPricingModeInherit
+	}
+	switch mode {
+	case models.ResellerPricingModeInherit, models.ResellerPricingModeMarkupPercent, models.ResellerPricingModeFixedMarkup, models.ResellerPricingModeFixedPrice:
+	default:
+		return models.ResellerProductSetting{}, ErrResellerPricingModeInvalid
+	}
+	return models.ResellerProductSetting{
+		SKUID:             input.SKUID,
+		IsListed:          input.IsListed,
+		PricingMode:       mode,
+		MarkupPercent:     models.NewMoneyFromDecimal(input.MarkupPercent.Round(2)),
+		FixedMarkupAmount: models.NewMoneyFromDecimal(input.FixedMarkupAmount.Round(2)),
+		FixedPriceAmount:  models.NewMoneyFromDecimal(input.FixedPriceAmount.Round(2)),
+		SortOrder:         input.SortOrder,
+	}, nil
+}
+
+// previewValidateProductRuleAcrossSKUs 校验「商品级规则」对该商品下每个在售 SKU 都成立，与保存时的语义一致。
+func previewValidateProductRuleAcrossSKUs(profile *models.ResellerProfile, product models.Product, productSetting *models.ResellerProductSetting) (bool, string) {
+	for i := range product.SKUs {
+		sku := &product.SKUs[i]
+		if !sku.IsActive {
+			continue
+		}
+		base := sku.PriceAmount.Decimal.Round(2)
+		price, _, err := resolveResellerUnitAmount(profile, productSetting, nil, base)
+		if err == nil {
+			err = validateResellerUnitAmount(profile, sku, base, price)
+		}
+		if err != nil {
+			return false, previewErrorCode(err)
+		}
+	}
+	return true, ""
+}
+
+// previewErrorCode 将定价校验错误映射为稳定的前端可识别错误码（用于本地化提示）。
+func previewErrorCode(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrResellerMarkupExceeded):
+		return "markup_exceeded"
+	default:
+		return "price_invalid"
+	}
 }
 
 func computeResellerProductEffectivePrices(profile *models.ResellerProfile, product models.Product, settings []models.ResellerProductSetting) (map[uint]decimal.Decimal, map[uint]string, error) {

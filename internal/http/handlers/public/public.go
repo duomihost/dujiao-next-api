@@ -273,8 +273,9 @@ func (v *publicProductView) skuStockState(sv publicSKUView) (string, int64) {
 func (h *Handler) GetConfig(c *gin.Context) {
 	// 默认配置
 	defaults := map[string]interface{}{
-		"languages":                        append([]string(nil), constants.SupportedLocales...),
-		constants.SettingFieldSiteCurrency: constants.SiteCurrencyDefault,
+		"languages":                              append([]string(nil), constants.SupportedLocales...),
+		constants.SettingFieldSiteCurrency:       constants.SiteCurrencyDefault,
+		constants.SettingFieldStorefrontTemplate: constants.StorefrontTemplateDefault,
 		"contact": map[string]interface{}{
 			"telegram": "https://t.me/dujiaoka",
 			"whatsapp": "https://wa.me/1234567890",
