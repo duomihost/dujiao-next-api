@@ -106,7 +106,7 @@ LDFLAGS="-s -w -X github.com/dujiao-next/internal/version.Version=${APP_VERSION}
 
 log "注入版本号: $APP_VERSION"
 log "go build -> ${BIN_NAME}.new"
-CGO_ENABLED="${CGO_ENABLED:-1}" go build -trimpath -ldflags "$LDFLAGS" -o "${BIN_NAME}.new" "$BUILD_PKG"
+CGO_ENABLED="${CGO_ENABLED:-1}" go build -trimpath -tags release -ldflags "$LDFLAGS" -o "${BIN_NAME}.new" "$BUILD_PKG"
 
 log "原子替换二进制"
 mv -f "${BIN_NAME}.new" "$BIN_NAME"
